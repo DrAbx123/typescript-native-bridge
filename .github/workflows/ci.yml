@@ -10,7 +10,7 @@ permissions:
 
 env:
   VOLAR_BRANCH: master
-  VOLAR_SHA: 59df2981f38b03960deb9be93fdd940ab2ec72f6 # vuejs/language-tools@master
+  VOLAR_SHA: fc9b2d67cfb569d267d81061b643ee55d4b4c38e # vuejs/language-tools@master
   BASELINE: test/baselines/nav-results-8c26673-t1.json # sim-nav baseline gate (same as nightly)
 
 jobs:
