@@ -40,7 +40,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const TOTAL = 71;
+const TOTAL = 72;
 
 // Witnesses intentionally NOT in the matrix — run on demand (reasons above).
 const LOCAL_ONLY = [
@@ -157,6 +157,7 @@ const groups = [
 			'triage-nuxtui-exportstar', // ~0s
 			'triage-completion-span-i55', // ~6s (npm install @types/node best-effort + tsserver session)
 			'triage-prototype-refresh', // ~1s
+			'triage-declared-type-hostonly', // ~1s
 		],
 	},
 	{

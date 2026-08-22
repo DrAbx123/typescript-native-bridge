@@ -10549,6 +10549,49 @@ export function createTsgoChecker(program: any): any {
         return v;
     };
 
+    // Stock's type-returning checker methods never return undefined. The rpc()
+    // facade returns undefined when a host-bound symbol has no tsgo counterpart
+    // (volar virtual-doc host binder SymbolObject), so adapters that answer with
+    // a Type must converge that undefined onto a real Type instead of leaking it
+    // to stock services (the type-tree plugin does `'intrinsicName' in type`).
+    const errorOrAny = (): any => {
+        let fallback: any;
+        try {
+            fallback = typeof project.checker.getErrorType === "function"
+                ? project.checker.getErrorType()
+                : project.checker.getAnyType?.();
+        } catch { fallback = undefined; }
+        if (fallback) {
+            fixupType(fallback);
+            return fallback;
+        }
+        // Last resort: object shaped enough for tryGetReturnTypeOfFunction
+        // (`type.symbol === …`) and definitionFromType (`t.symbol && …`).
+        const TF = sync.TypeFlags;
+        return {
+            flags: TF.Any,
+            symbol: undefined,
+            getFlags() { return this.flags; },
+            getSymbol() { return undefined; },
+            getCallSignatures() { return []; },
+            getConstructSignatures() { return []; },
+            getProperties() { return []; },
+            getProperty() { return undefined; },
+            getApparentProperties() { return []; },
+            getStringIndexType() { return undefined; },
+            getNumberIndexType() { return undefined; },
+            getBaseTypes() { return []; },
+            isUnion() { return false; },
+            isIntersection() { return false; },
+            isLiteral() { return false; },
+            isStringLiteral() { return false; },
+            isNumberLiteral() { return false; },
+            isTypeParameter() { return false; },
+            isClassOrInterface() { return false; },
+            isClass() { return false; },
+        };
+    };
+
     // ── Object-literal completion batch ──────────────────────────────
     // Stock Completions.getPropertiesForObjectExpression makes O(3N) checker
     // calls for a union contextual type: getPromisedTypeOfPromise per member,
@@ -11266,45 +11309,8 @@ export function createTsgoChecker(program: any): any {
             // Stock's TypeChecker.getTypeOfSymbolAtLocation always returns a Type
             // (never undefined). Returning undefined lets tryGetReturnTypeOfFunction
             // crash on `type.symbol` (cluster E: typeDefinition at `return`).
-            // getErrorType/getAnyType can also be unavailable before checker
-            // intrinsics are wired (cold prefix) — synthesize a minimal Any.
-            const errorOrAny = (): any => {
-                let fallback: any;
-                try {
-                    fallback = typeof project.checker.getErrorType === "function"
-                        ? project.checker.getErrorType()
-                        : project.checker.getAnyType?.();
-                } catch { fallback = undefined; }
-                if (fallback) {
-                    fixupType(fallback);
-                    return fallback;
-                }
-                // Last resort: object shaped enough for tryGetReturnTypeOfFunction
-                // (`type.symbol === …`) and definitionFromType (`t.symbol && …`).
-                const TF = sync.TypeFlags;
-                return {
-                    flags: TF.Any,
-                    symbol: undefined,
-                    getFlags() { return this.flags; },
-                    getSymbol() { return undefined; },
-                    getCallSignatures() { return []; },
-                    getConstructSignatures() { return []; },
-                    getProperties() { return []; },
-                    getProperty() { return undefined; },
-                    getApparentProperties() { return []; },
-                    getStringIndexType() { return undefined; },
-                    getNumberIndexType() { return undefined; },
-                    getBaseTypes() { return []; },
-                    isUnion() { return false; },
-                    isIntersection() { return false; },
-                    isLiteral() { return false; },
-                    isStringLiteral() { return false; },
-                    isNumberLiteral() { return false; },
-                    isTypeParameter() { return false; },
-                    isClassOrInterface() { return false; },
-                    isClass() { return false; },
-                };
-            };
+            // Shared errorOrAny() (defined above) converges undefined onto a real
+            // Type, incl. the cold-prefix case before checker intrinsics are wired.
             const sf = location?.getSourceFile?.();
             if (sf) {
                 let start: number | undefined;
@@ -11529,8 +11535,11 @@ export function createTsgoChecker(program: any): any {
             if (!symbol) return undefined;
             ensureProject();
             const t = rpc().getDeclaredTypeOfSymbol(symbol);
-            if (t) fixupType(t);
-            return t;
+            if (t) { fixupType(t); return t; }
+            // Stock: `tryGetDeclaredTypeOfSymbol(symbol) || errorType` — never
+            // undefined. Host-bound (volar virtual-doc) symbols have no tsgo
+            // counterpart, so rpc() returns undefined; converge onto errorType.
+            return errorOrAny();
         },
         // Symbol-only queries the scope manager uses — see delegation in the
         // stubs section below (getShorthandAssignmentValueSymbol etc.).
