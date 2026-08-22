@@ -11527,8 +11527,21 @@ export function createTsgoChecker(program: any): any {
             ensureProject();
             return memoGet(typeOfSymbolCache, symbol, () => {
                 const t = rpc().getTypeOfSymbol(symbol);
-                if (t) fixupType(t);
-                return t;
+                if (t) { fixupType(t); return t; }
+                // Stock getTypeOfSymbol never returns undefined (checker.ts:12960):
+                // value/function/class/… kinds compute a type, every other kind
+                // (incl. Interface/TypeAlias/TypeParameter) falls through to errorType.
+                // rpc() returns undefined only for a host-only symbol — one with no
+                // tsgo counterpart. That symbol has no checker on either side: the
+                // host binder (bindSourceFile) produces symbols, not types, and tsgo
+                // has no mirror of the file to compute one. So no computed type exists.
+                // errorType is the faithful answer for the reachable host-only shape
+                // (the type-tree plugin's declaration-less symbol, flags 0 → stock's
+                // fallthrough) and the honest "unknown" sentinel otherwise — the same
+                // convergence getTypeAtLocation / getTypeOfSymbolAtLocation already
+                // apply for unmapped nodes. Known gap: a host-only symbol that is a
+                // value/function/class has no computable type here, unlike stock.
+                return errorOrAny();
             });
         },
         getDeclaredTypeOfSymbol(symbol: any): any {
