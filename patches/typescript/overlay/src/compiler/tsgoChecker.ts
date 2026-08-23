@@ -11633,7 +11633,13 @@ export function createTsgoChecker(program: any): any {
                     const sf = parent.getSourceFile?.();
                     if (sf?.fileName) {
                         const tsgoParent = findTsgoNodeAtPosition(sf.fileName, parent.getStart(sf), parent.kind, parent.getEnd(sf));
-                        if (tsgoParent) {
+                        // findTsgoNodeAtPosition falls back to the innermost node on
+                        // a kind miss; getSignatureFromDeclaration unconditionally reads
+                        // .Parameters(), so only function-like parents may cross the wire
+                        // (type-tree plugin probes transient property symbols whose parent
+                        // is a TypeLiteral — stock never calls getSignatureFromDeclaration
+                        // here, this enrichment is bridge-only).
+                        if (tsgoParent && isFunctionLike(tsgoParent)) {
                             const sig = project.checker.getSignatureFromDeclaration(tsgoParent);
                             typeParams = sig?.typeParameters ?? sig?.target?.typeParameters;
                             if (typeParams) for (const t of typeParams) fixupType(t);
