@@ -10807,7 +10807,22 @@ export function createTsgoChecker(program: any): any {
         // here only materializes a tsgo-backed skeleton (readFile +
         // computeLineStarts on lib.dom.d.ts, per generation) to then reject
         // it. Skip the program lookup entirely.
-        if (isBundledLibPath(fileName) || isHostLibFile(toHostFileName(fileName))) {
+        const hostFileName = toHostFileName(fileName);
+        if (isBundledLibPath(fileName) || isHostLibFile(hostFileName)) {
+            hostBoundSfMemo.set(fileName, null);
+            return undefined;
+        }
+        // A .d.ts only needs host-bound remap when the host actually serves it
+        // (open editor tab or virtual overlay). A plain disk declaration —
+        // node_modules, or an unopened project .d.ts — is authoritative on the
+        // tsgo side, so probing getSourceFile here just materializes a full
+        // host parse + binder run for no remap benefit (getCodeFixes spelling
+        // on a 20k-member intersection .d.ts burned ~50ms per keystroke).
+        if (hostFileName.endsWith(".d.ts")
+            && !(_hasHostBoundFiles
+                && isOverlayCandidatePath(hostFileName)
+                && (hostHasScriptSnapshot(hostForOverlaySyncLocal(), hostFileName, hostFileName)
+                    || _syncedOverlayContentByFile.has(hostFileName)))) {
             hostBoundSfMemo.set(fileName, null);
             return undefined;
         }

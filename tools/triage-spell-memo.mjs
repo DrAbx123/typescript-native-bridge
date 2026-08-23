@@ -55,10 +55,20 @@ const mainPath = path.join(dir, 'main.ts');
 fs.writeFileSync(mainPath, mainContent);
 const typo = mainContent.indexOf('f0_0x');
 
+// A host-side parse of big.d.ts is exactly what getHostBoundSf must skip. The
+// witness host serves any disk file via getScriptSnapshot, so the only caller
+// that would read big.d.ts here is the getSourceFile probe getHostBoundSf used
+// to make before the .d.ts skip. Count those reads and assert zero below.
+const bigPath = path.join(dir, 'big.d.ts');
+let bigSnapshotCalls = 0;
+
 const host = {
     getScriptFileNames: () => [mainPath],
     getScriptVersion: () => '1',
-    getScriptSnapshot: f => fs.existsSync(f) ? ts.ScriptSnapshot.fromString(fs.readFileSync(f, 'utf8')) : undefined,
+    getScriptSnapshot: f => {
+        if (path.resolve(f) === bigPath) bigSnapshotCalls++;
+        return fs.existsSync(f) ? ts.ScriptSnapshot.fromString(fs.readFileSync(f, 'utf8')) : undefined;
+    },
     getCurrentDirectory: () => dir,
     getCompilationSettings: () => ({ strict: true, noEmit: true, target: ts.ScriptTarget.ESNext, configFilePath: path.join(dir, 'tsconfig.json') }),
     getDefaultLibFileName: o => ts.getDefaultLibFilePath(o),
@@ -86,8 +96,10 @@ try {
     };
 
     // Warm the spelling path once: this materializes the intersection member
-    // list on the API checker (and pays the one-time host-side parse of
-    // big.d.ts) so the cross-path assertion below is not polluted by either.
+    // list on the API checker. big.d.ts must NOT be host-parsed here (the
+    // .d.ts skip in getHostBoundSf), so the cross-path assertion below is not
+    // polluted by a cold host parse either.
+    bigSnapshotCalls = 0;
     checker.getSuggestedSymbolForNonexistentProperty(node, containingType);
 
     // A. semantic diagnostics uses the diagnostics checker. With the program-level
@@ -99,6 +111,14 @@ try {
     const B = time(() => checker.getSuggestedSymbolForNonexistentProperty(node, containingType));
 
     console.log(`check:spell-memo A(semantic-after-warm)=${A.ms}ms B(suggest-warm)=${B.ms}ms`);
+
+    if (bigSnapshotCalls > 0) {
+        throw new Error(
+            `getHostBoundSf triggered a host parse of big.d.ts (getScriptSnapshot called ${bigSnapshotCalls}×) — ` +
+            'the .d.ts skip did not hold',
+        );
+    }
+    console.log(`check:spell-memo .d.ts-skip ok (big.d.ts host snapshot reads=${bigSnapshotCalls})`);
 
     // A must be a memo hit: the diagnostics checker reuses the materialization
     // already produced by the spelling path. A re-derivation is ~an order of
