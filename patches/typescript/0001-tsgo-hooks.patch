@@ -609,7 +609,7 @@ index 6034c9dfc3..0c9a6178db 100644
      let computedWithoutCacheCount = 0;
      const fixes = flatMap(exportInfo, (exportInfo, i) => {
 diff --git a/src/services/completions.ts b/src/services/completions.ts
-index 28d29136da..d5ba59f622 100644
+index 28d29136da..7c09c91d2e 100644
 --- a/src/services/completions.ts
 +++ b/src/services/completions.ts
 @@ -175,6 +175,7 @@ import {
@@ -802,10 +802,17 @@ index 28d29136da..d5ba59f622 100644
          // expressions are value space (which includes the value namespaces)
          return !!(allFlags & SymbolFlags.Value);
      }
-@@ -3147,6 +3197,19 @@ function getCompletionEntryCodeActionsAndSourceDisplay(
+@@ -3147,6 +3197,26 @@ function getCompletionEntryCodeActionsAndSourceDisplay(
          return { codeActions: undefined, sourceDisplay: undefined };
      }
  
++    // Native auto-import completion entries carry tnbCompletionData so their
++    // details resolve through tsgo's completion-resolve lifecycle instead of
++    // stock's export-map walk. Stock's OLD getImportCompletionAction path
++    // (data.exportMapKey === undefined) compares export-map symbols by object
++    // identity, which tsgo proxy symbols never satisfy — it asserts instead of
++    // resolving. The native resolver re-runs the same auto-import fix Go-side
++    // and returns the import edit directly.
 +    if (data?.tnbCompletionData && (program as any).isTsgoBackedProgram === true) {
 +        const result = (program as any).resolveCompletionItemTsgo(
 +            sourceFile.fileName,
@@ -822,7 +829,7 @@ index 28d29136da..d5ba59f622 100644
      const checker = origin.isFromPackageJson ? host.getPackageJsonAutoImportProvider!()!.getTypeChecker() : program.getTypeChecker();
      const { moduleSymbol } = origin;
      const targetSymbol = checker.getMergedSymbol(skipAlias(symbol.exportSymbol || symbol, checker));
-@@ -3588,6 +3651,11 @@ function getCompletionData(
+@@ -3588,6 +3658,11 @@ function getCompletionData(
      let importSpecifierResolver: codefix.ImportSpecifierResolver | undefined;
      const symbolToOriginInfoMap: SymbolOriginInfoMap = [];
      const symbolToSortTextMap: SymbolSortTextMap = [];
@@ -834,7 +841,7 @@ index 28d29136da..d5ba59f622 100644
      const seenPropertySymbols = new Set<SymbolId>();
      const isTypeOnlyLocation = isTypeOnlyCompletion();
      const getModuleSpecifierResolutionHost = memoizeOne((isFromPackageJson: boolean) => {
-@@ -4028,13 +4096,29 @@ function getCompletionData(
+@@ -4028,13 +4103,29 @@ function getCompletionData(
  
          symbols = concatenate(symbols, typeChecker.getSymbolsInScope(scopeNode, symbolMeanings));
          Debug.assertEachIsDefined(symbols, "getSymbolsInScope() should all be defined");
@@ -865,7 +872,7 @@ index 28d29136da..d5ba59f622 100644
              }
              if (typeOnlyAliasNeedsPromotion && !(symbol.flags & SymbolFlags.Value)) {
                  const typeOnlyAliasDeclaration = symbol.declarations && find(symbol.declarations, isTypeOnlyImportDeclaration);
-@@ -4161,11 +4245,74 @@ function getCompletionData(
+@@ -4161,11 +4252,74 @@ function getCompletionData(
          const exportInfo = getExportInfoMap(sourceFile, host, program, preferences, cancellationToken);
          const packageJsonAutoImportProvider = host.getPackageJsonAutoImportProvider?.();
          const packageJsonFilter = detailsEntryId ? undefined : createPackageJsonImportFilter(sourceFile, preferences, host);
@@ -941,7 +948,7 @@ index 28d29136da..d5ba59f622 100644
              position,
              preferences,
              !!importStatementCompletion,
-@@ -4232,6 +4379,7 @@ function getCompletionData(
+@@ -4232,6 +4386,7 @@ function getCompletionData(
                              isDefaultExport,
                              moduleSymbol: exportInfo.moduleSymbol,
                              isFromPackageJson: exportInfo.isFromPackageJson,
@@ -949,7 +956,7 @@ index 28d29136da..d5ba59f622 100644
                          });
                      },
                  );
-@@ -4240,20 +4388,7 @@ function getCompletionData(
+@@ -4240,20 +4395,7 @@ function getCompletionData(
                  flags |= context.resolvedAny() ? CompletionInfoFlags.ResolvedModuleSpecifiers : 0;
                  flags |= context.resolvedBeyondLimit() ? CompletionInfoFlags.ResolvedModuleSpecifiersBeyondLimit : 0;
              },
@@ -971,7 +978,7 @@ index 28d29136da..d5ba59f622 100644
      }
  
      function pushAutoImportSymbol(symbol: Symbol, origin: SymbolOriginInfoResolvedExport | SymbolOriginInfoExport) {
-@@ -4262,6 +4397,12 @@ function getCompletionData(
+@@ -4262,6 +4404,12 @@ function getCompletionData(
              // If an auto-importable symbol is available as a global, don't add the auto import
              return;
          }
@@ -984,40 +991,33 @@ index 28d29136da..d5ba59f622 100644
          symbolToOriginInfoMap[symbols.length] = origin;
          symbolToSortTextMap[symbolId] = importStatementCompletion ? SortText.LocationPriority : SortText.AutoImportSuggestions;
          symbols.push(symbol);
-@@ -5382,14 +5523,25 @@ function getRelevantTokens(position: number, sourceFile: SourceFile): { contextT
- function getAutoImportSymbolFromCompletionEntryData(name: string, data: CompletionEntryData, program: Program, host: LanguageServiceHost): { symbol: Symbol; origin: SymbolOriginInfoExport | SymbolOriginInfoResolvedExport; } | undefined {
+@@ -5383,7 +5531,7 @@ function getAutoImportSymbolFromCompletionEntryData(name: string, data: Completi
      const containingProgram = data.isPackageJsonImport ? host.getPackageJsonAutoImportProvider!()! : program;
      const checker = containingProgram.getTypeChecker();
--    const moduleSymbol = data.ambientModuleName ? checker.tryFindAmbientModule(data.ambientModuleName) :
+     const moduleSymbol = data.ambientModuleName ? checker.tryFindAmbientModule(data.ambientModuleName) :
 -        data.fileName ? checker.getMergedSymbol(Debug.checkDefined(containingProgram.getSourceFile(data.fileName)).symbol) :
--        undefined;
--
-+    const tsgoProgram = containingProgram as Program & {
-+        readonly isTsgoBackedProgram: true;
-+        getCompletionEntryDataSymbols(fileName: string | undefined, ambientModuleName: string | undefined, exportName: string): { moduleSymbol: Symbol; symbol: Symbol; } | undefined;
-+    };
-+    let moduleSymbol: Symbol | undefined;
-+    let symbol: Symbol | undefined;
-+    if (tsgoProgram.isTsgoBackedProgram === true) {
-+        const resolved = tsgoProgram.getCompletionEntryDataSymbols(data.fileName, data.ambientModuleName, data.exportName);
-+        if (resolved) ({ moduleSymbol, symbol } = resolved);
-+    }
-+    else {
-+        moduleSymbol = data.ambientModuleName ? checker.tryFindAmbientModule(data.ambientModuleName) :
-+            data.fileName ? checker.getMergedSymbol(Debug.checkDefined(containingProgram.getSourceFile(data.fileName)).symbol) :
-+            undefined;
-+        symbol = moduleSymbol && (data.exportName === InternalSymbolName.ExportEquals
-+            ? checker.resolveExternalModuleSymbol(moduleSymbol)
-+            : checker.tryGetMemberInModuleExportsAndProperties(data.exportName, moduleSymbol));
-+    }
++        data.fileName ? getModuleSymbolForCompletionEntryData(containingProgram, checker, data.fileName) :
+         undefined;
+ 
      if (!moduleSymbol) return undefined;
--    let symbol = data.exportName === InternalSymbolName.ExportEquals
--        ? checker.resolveExternalModuleSymbol(moduleSymbol)
--        : checker.tryGetMemberInModuleExportsAndProperties(data.exportName, moduleSymbol);
-     if (!symbol) return undefined;
-     const isDefaultExport = data.exportName === InternalSymbolName.Default;
-     symbol = isDefaultExport && getLocalSymbolForExportDefault(symbol) || symbol;
-@@ -6089,6 +6241,23 @@ function isDeprecated(symbol: Symbol, checker: TypeChecker) {
+@@ -5396,6 +5544,16 @@ function getAutoImportSymbolFromCompletionEntryData(name: string, data: Completi
+     return { symbol, origin: completionEntryDataToSymbolOriginInfo(data, name, moduleSymbol) };
+ }
+ 
++function getModuleSymbolForCompletionEntryData(program: Program, checker: TypeChecker, fileName: string): Symbol {
++    const sourceFile = Debug.checkDefined(program.getSourceFile(fileName));
++    // tsgo-backed programs hand out a host-binder facade for sf.symbol whose
++    // object identity does not match the registry-proxied symbols inside
++    // export info maps; resolve through the bridged checker when it can answer
++    // (absent on stock checkers — falls back to stock behavior).
++    const forSourceFile = (checker as unknown as { getModuleSymbolForSourceFile?: (sourceFile: SourceFile) => Symbol | undefined; }).getModuleSymbolForSourceFile;
++    return checker.getMergedSymbol(forSourceFile?.(sourceFile) ?? Debug.checkDefined(sourceFile.symbol));
++}
++
+ interface CompletionEntryDisplayNameForSymbol {
+     readonly name: string;
+     readonly needsConvertPropertyAccess: boolean;
+@@ -6089,6 +6247,23 @@ function isDeprecated(symbol: Symbol, checker: TypeChecker) {
      return !!length(declarations) && every(declarations, isDeprecatedDeclaration);
  }
  
