@@ -18,11 +18,12 @@
 
 import * as ts from "./_namespaces/ts.js";
 import { bindSourceFile } from "./binder.js";
-import { createSourceFile } from "./parser.js";
+import { createSourceFile, isExternalModule } from "./parser.js";
 import { SyntaxKind, SymbolFlags, SymbolFormatFlags, NodeFlags, ModifierFlags, JSDocParsingMode, ModuleKind, StructureIsReused, EmitHint, EmitFlags, InternalSymbolName, type Path, type Program, type TypeChecker } from "./types.js";
 import { getBuildInfoText, getTsBuildInfoEmitOutputFilePath, createPrinterWithRemoveComments } from "./emitter.js";
-import { usingSingleLineStringWriter, canHaveJSDoc } from "./utilities.js";
-import { getParseTreeNode, isFunctionLike } from "./utilitiesPublic.js";
+import { usingSingleLineStringWriter, canHaveJSDoc, isAnyImportOrReExport, getExternalModuleName, isAmbientModule, getTextOfIdentifierOrLiteral, hasSyntacticModifier, forEachDynamicImportOrRequireCall } from "./utilities.js";
+import { getParseTreeNode, isFunctionLike, isExternalModuleNameRelative } from "./utilitiesPublic.js";
+import { isStringLiteral, isModuleDeclaration } from "./factory/nodeTests.js";
 import { setEmitFlags, addEmitFlags } from "./factory/emitNode.js";
 import { getModeForResolutionAtIndex } from "./program.js";
 import { installTsgoBackedSourceFileLoader, inferScriptKind, createSkeletonSourceFile, getTsgoBackedSourceFile } from "./tsgoBackedSourceFile.js";
@@ -2857,73 +2858,83 @@ function sourceFileFromHostSnapshot(host: any, hostFileName: string, requestFile
     return attachHostSourceFileMetadata(sf, hostFileName);
 }
 
-/** Ensure host SourceFiles expose stable path metadata for LS + module path completion. */
 /**
- * Soft-P′: stock `Program.collectExternalModuleReferences` fills `SourceFile.imports`.
- * Host-bound LS files never pass through that path. Assigning `imports: []` here poisoned
- * importTracker.forEachImport — when `imports !== undefined` it iterates the array and
- * NEVER falls through to statement scanning, so closed/open importer files look import-less
- * and FAR never finds cross-file import sites even when getExportInfo succeeds.
+ * Soft-P′: stock `Program.collectExternalModuleReferences` fills `SourceFile.imports`
+ * (and `moduleAugmentations` / `ambientModuleNames`). Host-bound LS files never pass
+ * through program construction, so this mirrors that pass exactly (minus the synthetic
+ * tslib/jsx-runtime literals — tsgo adds those to its resolution list separately with
+ * `importIndex < 0` and drops them on the wire, so a host-side synthetic literal would
+ * shift every real import index).
+ *
+ * The Go include-reason `index` addresses the same two-phase list — top-level
+ * import/re-export/import-equals specifiers in statement order, THEN dynamic
+ * import()/require()/import("x")-type specifiers in text order — so a single interleaved
+ * walk shifts indices (wrong specifier, or `getModuleNameStringLiteralAt` Debug.fail when
+ * the host list ends up shorter).
  */
 function ensureHostSourceFileModuleRefs(sf: any): void {
     if (!sf) return;
-    // Real imports already collected — keep. Empty `[]` may be Soft-P′ poison from an
-    // earlier attachHostSourceFileMetadata; rebuild from statements.
-    if (sf.imports && sf.imports.length > 0) return;
-    const imports: any[] = [];
-    const pushSpec = (spec: any): void => {
-        if (
-            spec
-            && typeof spec.text === "string"
-            && spec.text.length
-            && (spec.kind === SyntaxKind.StringLiteral || spec.kind === SyntaxKind.NoSubstitutionTemplateLiteral)
-        ) {
-            imports.push(spec);
+    // Stock guard `if (file.imports) return`: an empty array is truthy, so once the
+    // pass has run the three fields are final. `externalModuleIndicator` is parser-set
+    // (createSourceFile), not binder-set, so this is safe before ensureHostSourceFileBound.
+    if (sf.imports) return;
+
+    const isJavaScriptFile = (sf.flags & NodeFlags.JavaScriptFile) !== 0;
+    const isExternalModuleFile = isExternalModule(sf);
+    let imports: any[] | undefined;
+    let moduleAugmentations: any[] | undefined;
+    let ambientModuleNames: string[] | undefined;
+
+    const collectModuleReferences = (node: any, inAmbientModule: boolean): void => {
+        if (isAnyImportOrReExport(node)) {
+            const moduleNameExpr = getExternalModuleName(node);
+            // TypeScript 1.0 spec (April 2014): 12.1.6 — an ambient external module may
+            // reference other external modules only through non-relative top-level names.
+            if (moduleNameExpr && isStringLiteral(moduleNameExpr) && moduleNameExpr.text
+                && (!inAmbientModule || !isExternalModuleNameRelative(moduleNameExpr.text))) {
+                (imports || (imports = [])).push(moduleNameExpr);
+            }
+        }
+        else if (isModuleDeclaration(node)) {
+            if (isAmbientModule(node) && (inAmbientModule || hasSyntacticModifier(node, ModifierFlags.Ambient) || sf.isDeclarationFile)) {
+                if (node.name) (node.name as any).parent = node;
+                const nameText = getTextOfIdentifierOrLiteral(node.name);
+                // Ambient module declarations can be interpreted as augmentations for some
+                // existing external modules — when the file is itself an external module, or
+                // the declaration is a non-relative module nested in a top-level ambient module.
+                if (isExternalModuleFile || (inAmbientModule && !isExternalModuleNameRelative(nameText))) {
+                    (moduleAugmentations || (moduleAugmentations = [])).push(node.name);
+                }
+                else if (!inAmbientModule) {
+                    // Global .d.ts files record the ambient module name; the body is then
+                    // walked as an ambient module (inAmbientModule=true) for nested imports.
+                    if (sf.isDeclarationFile) {
+                        (ambientModuleNames || (ambientModuleNames = [])).push(nameText);
+                    }
+                    const body = node.body;
+                    if (body) {
+                        for (const statement of body.statements ?? []) {
+                            collectModuleReferences(statement, true);
+                        }
+                    }
+                }
+            }
         }
     };
-    // Mirror stock Program.collectExternalModuleReferences (program.ts:3362-3371):
-    // statement-level import/re-export/import-equals specifiers PLUS type-space
-    // import("mod").T arguments and dynamic import()/require() call arguments —
-    // findModuleReferences (importTracker.forEachImport) matches module symbols
-    // only through file.imports, so omitting type-space literals drops FAR refs
-    // at `import('vue').X` sites (sim-nav refs-missing cross-vue cluster).
-    const walk = (node: any): void => {
-        if (!node) return;
-        const kind = node.kind;
-        if (kind === SyntaxKind.ImportDeclaration || kind === SyntaxKind.ExportDeclaration) {
-            pushSpec(node.moduleSpecifier);
-        }
-        else if (kind === SyntaxKind.ImportEqualsDeclaration) {
-            const ref = node.moduleReference;
-            if (ref?.kind === SyntaxKind.ExternalModuleReference) {
-                pushSpec(ref.expression);
-            }
-        }
-        else if (kind === SyntaxKind.ImportType) {
-            const arg = node.argument;
-            if (arg?.kind === SyntaxKind.LiteralType) {
-                pushSpec(arg.literal);
-            }
-        }
-        else if (kind === SyntaxKind.CallExpression) {
-            const expr = node.expression;
-            if (expr?.kind === SyntaxKind.ImportKeyword || (expr?.kind === SyntaxKind.Identifier && expr.text === "require")) {
-                pushSpec(node.arguments?.[0]);
-            }
-        }
-        else if (kind === SyntaxKind.JSDocImportTag) {
-            // Stock reaches JSDoc import tags via forEachDynamicImportOrRequireCall
-            // (includeTypeSpaceImports) — the @import module specifier belongs in
-            // file.imports so findModuleReferences matches module-specifier FAR.
-            pushSpec(node.moduleSpecifier);
-        }
-        // forEachChild has no jsDoc slot on statements (stock forEachChildVisitor),
-        // so JSDoc tags are invisible to the plain child walk — descend explicitly.
-        if (Array.isArray(node.jsDoc)) for (const doc of node.jsDoc) walk(doc);
-        (ts as any).forEachChild?.(node, walk);
-    };
-    for (const statement of sf.statements ?? []) walk(statement);
-    sf.imports = imports;
+
+    for (const statement of sf.statements ?? []) {
+        collectModuleReferences(statement, false);
+    }
+
+    if ((sf.flags & NodeFlags.PossiblyContainsDynamicImport) !== 0 || isJavaScriptFile) {
+        forEachDynamicImportOrRequireCall(sf, /*includeTypeSpaceImports*/ true, /*requireStringLiteralLikeArgument*/ true, (_node: any, moduleSpecifier: any) => {
+            (imports || (imports = [])).push(moduleSpecifier);
+        });
+    }
+
+    sf.imports = imports || [];
+    sf.moduleAugmentations = moduleAugmentations || [];
+    sf.ambientModuleNames = ambientModuleNames || [];
 }
 
 function attachHostSourceFileMetadata(sf: any, hostFileName: string): any {
@@ -2933,17 +2944,6 @@ function attachHostSourceFileMetadata(sf: any, hostFileName: string): any {
     sf.path = canon as Path;
     sf.resolvedPath = canon as Path;
     ensureHostSourceFileModuleRefs(sf);
-    if (!sf.moduleAugmentations) sf.moduleAugmentations = [];
-    // Stock sets ambientModuleNames in collectExternalModuleReferences (program
-    // construction), which the thin program skips. The export-map cache's
-    // onFileChanged iterates it (ambientModuleDeclarationsAreEqual) whenever a
-    // structure-reused program reports a changed file — derive it from the
-    // parsed statements so ambient-module edits still invalidate the cache.
-    if (!sf.ambientModuleNames) {
-        sf.ambientModuleNames = ((sf.statements ?? []) as any[])
-            .filter(s => s.kind === SyntaxKind.ModuleDeclaration && s.name?.kind === SyntaxKind.StringLiteral)
-            .map(s => s.name.text);
-    }
     if (!("version" in sf)) {
         try { Object.defineProperty(sf, "version", { value: "1", writable: true, configurable: true, enumerable: false }); } catch {}
     }
