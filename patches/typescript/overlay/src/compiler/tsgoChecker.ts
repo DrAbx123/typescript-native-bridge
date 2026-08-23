@@ -10329,6 +10329,35 @@ export function createTsgoChecker(program: any): any {
         return deepest;
     }
 
+    /**
+     * Map an enclosingDeclaration to its tsgo mirror, falling back to the
+     * symbol's own tsgo declaration's source file when the caller supplied no
+     * enclosing context (or a host-bound one with no tsgo mirror). Stock's
+     * NodeBuilder accepts a nil enclosingDeclaration and only computes the
+     * `import("…")` resolution-mode context lazily; tsgo's `symbolToTypeNode`
+     * dereferences the enclosing declaration's source file unconditionally
+     * (nodebuilderimpl.go:678) and nil-derefs when it is absent. A symbol whose
+     * declared type references an external module — the type-tree plugin's
+     * `symbolToParameterDeclaration(prop, undefined)` probe — therefore needs a
+     * non-nil enclosing context: the symbol's own declaration's file is the
+     * natural scope for serializing its type and carries a tsgo SourceFile the
+     * RPC can send.
+     */
+    function mapEnclosingToTsgoWithSymbolFallback(enclosingDeclaration: any, symbol?: any): any {
+        const mapped = mapHostEnclosingToTsgo(enclosingDeclaration);
+        if (mapped) return mapped;
+        if (!symbol || !isTsgoBridgeSymbol(symbol)) return undefined;
+        let decl: any;
+        try { decl = symbol.valueDeclaration ?? symbol.declarations?.[0]; } catch { return undefined; }
+        // Resolve to the *tsgo* SourceFile, never the host-bound SourceFile:
+        // a host-bound declaration's getSourceFile() is a host SF, which
+        // getNodeId rejects ("getNodeId requires a RemoteNode"). The tsgo
+        // SourceFile for a host-only virtual file is simply absent → undefined
+        // → the original nil-enclosing path (harmless without a module type).
+        const fileName = decl?.getSourceFile?.()?.fileName;
+        return typeof fileName === "string" ? getTsgoSourceFile(fileName) : undefined;
+    }
+
     // ── Host↔tsgo symbol RPC boundary ────────────────────────────────
     // Two kinds of symbols flow through the checker surface:
     //   1. tsgo bridge symbols (native-preview _sync.Symbol) — their .id is a
@@ -11607,7 +11636,7 @@ export function createTsgoChecker(program: any): any {
             ensureProject();
             const rpcSym = resolveRpcSymbol(symbol);
             if (!rpcSym) return undefined;
-            const tsgoLocation = mapHostEnclosingToTsgo(enclosingDeclaration);
+            const tsgoLocation = mapEnclosingToTsgoWithSymbolFallback(enclosingDeclaration, rpcSym);
             const nodes = project.checker.symbolToTypeParameterDeclarations(rpcSym, tsgoLocation, flags) ?? [];
             const list: any = nodes.slice();
             list.pos = -1;
@@ -11623,7 +11652,7 @@ export function createTsgoChecker(program: any): any {
             ensureProject();
             const rpcSym = resolveRpcSymbol(symbol);
             if (!rpcSym) return undefined;
-            const tsgoLocation = mapHostEnclosingToTsgo(enclosingDeclaration);
+            const tsgoLocation = mapEnclosingToTsgoWithSymbolFallback(enclosingDeclaration, rpcSym);
             const node = project.checker.symbolToParameterDeclaration(rpcSym, tsgoLocation, flags);
             if (node?.type) {
                 let typeParams: readonly any[] | undefined;
