@@ -8128,7 +8128,15 @@ export function createTsgoProgram(
         // registry bucket and abort ConfiguredProject.close mid-teardown.
         isTsgoBackedProgram: true,
         __tnbGetSourceVersion: (fileName: string): string | undefined => {
-            return getBuilderMetaState()?.byHostFile.get(fileName)?.version;
+            // Must return the exact value SourceFile.version reports for the
+            // same file, so isProgramUptoDate's version comparison is a no-op
+            // (content edits are handled by __tnbSyncOverlay, not a rebuild).
+            // getSourceFiles() serves fullSfByName hits (host-parsed files whose
+            // version is the host script version) and light stubs (version is the
+            // Go content hash via tnbSharedStubVersion); mirror that same lookup.
+            const full = fullSfByName.get(fileName);
+            if (full) return full.version;
+            return getOrCreateLightSourceFile(fileName).version;
         },
         __tnbIsProgramUptoDate: (_rootFileNames: readonly string[], currentOptions: any): boolean => {
             // Structure-shape check (file set + structure-affecting options) —
