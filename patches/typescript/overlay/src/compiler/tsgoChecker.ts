@@ -8172,6 +8172,24 @@ export function createTsgoProgram(
         __tnbSyncOverlay: (): void => {
             if (tsserverWalk) _overlaySyncByConfig.get(configFilePath!)?.();
         },
+        __tnbInvalidateHostSourceFile: (fileName: string): void => {
+            // A content edit pushed via updateSnapshot leaves the JS-side host
+            // SourceFile caches stale: sfCache keys on host.getScriptVersion,
+            // which tsserver reports as a constant, so a version-keyed miss
+            // never fires and the old host AST/text is served against the fresh
+            // Go snapshot (semantic highlights computed off stale positions).
+            // Drop every JS-side materialization of this file so the next
+            // getSourceFile re-parses the fresh host snapshot.
+            const rawHostName = resolveHostFileName(fileName, host);
+            const hostFileName = hostNameForQuery(rawHostName);
+            fullSfByName.delete(hostFileName);
+            diagnosticSfCache.delete(rawHostName);
+            diagnosticSfCache.delete(hostFileName);
+            const prefix = hostFileName + "@";
+            for (const key of sfCache.keys()) {
+                if (key.startsWith(prefix)) sfCache.delete(key);
+            }
+        },
         getRootFileNames: () => collectTsgoOpenFileNames(programCtx.lsHost, rootNames as string[]),
         getCompilerOptions: () => options,
         getSourceFileNames,
@@ -10189,6 +10207,11 @@ export function createTsgoChecker(program: any): any {
             tsgoSfCache.delete(f.fileName);
             nodeIndexCache.delete(f.fileName);
             nodeAtPosCache.delete(f.fileName);
+            // The Go snapshot advanced; the JS-side host SourceFile caches for
+            // this file are now stale (sfCache keys on a constant host version),
+            // so drop them too or semantic highlights/diagnostics walk the old
+            // AST against the new snapshot.
+            programCtx?.thinProgram?.__tnbInvalidateHostSourceFile?.(f.fileName);
         }
         // Every updateSnapshot REPLACES the Go snapshot and disposes the
         // previous generation's handle registry — the caches below all hold
