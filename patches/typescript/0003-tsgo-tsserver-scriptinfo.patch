@@ -1,5 +1,5 @@
 diff --git a/src/server/project.ts b/src/server/project.ts
-index 88fa23c1bc..59eaae37d6 100644
+index 88fa23c1bc..2d8b70564d 100644
 --- a/src/server/project.ts
 +++ b/src/server/project.ts
 @@ -76,6 +76,7 @@ import {
@@ -52,7 +52,25 @@ index 88fa23c1bc..59eaae37d6 100644
          });
      }
  
-@@ -1690,8 +1700,12 @@ export abstract class Project implements LanguageServiceHost, ModuleResolutionHo
+@@ -1449,7 +1459,16 @@ export abstract class Project implements LanguageServiceHost, ModuleResolutionHo
+             // (can reuse cached imports for files that were not changed)
+             // 4. compilation settings were changed in the way that might affect module resolution - drop all caches and collect all data from the scratch
+             if (hasNewProgram || changedFiles.length) {
+-                this.lastCachedUnresolvedImportsList = getUnresolvedImports(this.program!, this.cachedUnresolvedImportsPerFile);
++                // tsgo-backed programs resolve modules in Go (their own
++                // resolution cache: getProgramResolutionInfo /
++                // getModuleExportMap), so the JS-side unresolved-import walk —
++                // which re-derives the same data through a whole-program RPC
++                // dump on every update — is skipped. Its only consumer is the
++                // typings installer (auto-install @types), which tsgo does not
++                // route through the JS resolver.
++                this.lastCachedUnresolvedImportsList = (this.program as any)?.isTsgoBackedProgram
++                    ? emptyArray
++                    : getUnresolvedImports(this.program!, this.cachedUnresolvedImportsPerFile);
+             }
+ 
+             this.enqueueInstallTypingsForProject(hasAddedorRemovedFiles);
+@@ -1690,8 +1709,12 @@ export abstract class Project implements LanguageServiceHost, ModuleResolutionHo
                  const file = this.program!.getSourceFileByPath(path);
                  const info = value.info;
                  if (!file || value.info?.path === file.resolvedPath) return;
@@ -67,7 +85,7 @@ index 88fa23c1bc..59eaae37d6 100644
                  info?.detachFromProject(this);
              });
  
-@@ -1956,6 +1970,14 @@ export abstract class Project implements LanguageServiceHost, ModuleResolutionHo
+@@ -1956,6 +1979,14 @@ export abstract class Project implements LanguageServiceHost, ModuleResolutionHo
  
      /** @internal */
      print(writeProjectFileNames: boolean, writeFileExplaination: boolean, writeFileVersionAndText: boolean): void {
@@ -82,7 +100,7 @@ index 88fa23c1bc..59eaae37d6 100644
          this.writeLog(`Project '${this.projectName}' (${ProjectKind[this.projectKind]})`);
          this.writeLog(this.filesToStringWorker(
              writeProjectFileNames && this.projectService.logger.hasLevel(LogLevel.verbose),
-@@ -2646,7 +2668,8 @@ export class AutoImportProviderProject extends Project {
+@@ -2646,7 +2677,8 @@ export class AutoImportProviderProject extends Project {
              }
          }
  
@@ -92,7 +110,7 @@ index 88fa23c1bc..59eaae37d6 100644
          let referencesAddded = 0;
          if (references?.length && hostProject.projectService.getHostPreferences().includeCompletionsForModuleExports) {
              // Add direct referenced projects to rootFiles names
-@@ -2729,6 +2752,27 @@ export class AutoImportProviderProject extends Project {
+@@ -2729,6 +2761,27 @@ export class AutoImportProviderProject extends Project {
                  }
              });
          }
@@ -120,7 +138,7 @@ index 88fa23c1bc..59eaae37d6 100644
      }
  
      /** @internal */
-@@ -2751,10 +2795,20 @@ export class AutoImportProviderProject extends Project {
+@@ -2751,10 +2804,20 @@ export class AutoImportProviderProject extends Project {
              return undefined;
          }
  
@@ -145,7 +163,7 @@ index 88fa23c1bc..59eaae37d6 100644
  
          const rootNames = this.getRootFileNames(dependencySelection, hostProject, host, compilerOptions);
          if (!rootNames.length) {
-@@ -2815,7 +2869,13 @@ export class AutoImportProviderProject extends Project {
+@@ -2815,7 +2878,13 @@ export class AutoImportProviderProject extends Project {
          this.rootFileNames = rootFileNames;
          const oldProgram = this.getCurrentProgram();
          const hasSameSetOfFiles = super.updateGraph();
