@@ -5940,7 +5940,12 @@ function collectExtraFileExtensions(fileNames: Iterable<string>, options: any): 
     const exts = new Set<string>();
     for (const extension of ts.supportedTSExtensionsFlat) {
         const ext = extension.toLowerCase();
-        if (!builtin.has(ext)) exts.add(ext);
+        // Declaration extensions (.d.ts / .d.cts / .d.mts) are builtin script
+        // extensions in declaration form, not "arbitrary" extensions — normalize
+        // to their base before the builtin check so a plain-.ts host does not
+        // spuriously inject allowArbitraryExtensions.
+        const base = ext.startsWith(".d.") ? ext.slice(2) : ext;
+        if (!builtin.has(base)) exts.add(ext);
     }
     for (const fn of fileNames) {
         if (typeof fn !== "string") continue;
@@ -7763,6 +7768,20 @@ export function createTsgoProgram(
     const tsserverWalk = !!(lsHost as any)?.projectService;
     // Mirror of the getBuilderMetaState fetch gate, for shared-stub version getters.
     const builderMetaEnabled = !((options as any).tscBuild && !options.incremental && !options.composite);
+    // Per-program host-version snapshot for the createLanguageService path: a
+    // content-only edit (host.getScriptVersion bump) must recreate the program
+    // so tsgo re-reads the host content. Captured in this program's closure
+    // scope — never read by versionForFile/tnbSharedStubVersion, so
+    // sourceFile.version stays the Go content hash everywhere.
+    let lsHostVersionSnapshot: Map<string, string> | undefined;
+    if (!tsserverWalk && typeof lsHost?.getScriptVersion === "function") {
+        const snap = new Map<string, string>();
+        for (const fn of getSourceFileNames()) {
+            const hv = lsHost.getScriptVersion(fn);
+            snap.set(fn, typeof hv === "string" && hv.length ? hv : "1");
+        }
+        lsHostVersionSnapshot = snap;
+    }
     const getOrCreateLightSourceFile = (fileName: string): any => {
         // Use the SAME host-name normalization as getOrCreateSourceFile
         // (resolveHostFileName + folded-Path recovery), not the weaker
@@ -8108,6 +8127,43 @@ export function createTsgoProgram(
         // mandatory) releaseDocumentWithKey pass, which would fault on the missing
         // registry bucket and abort ConfiguredProject.close mid-teardown.
         isTsgoBackedProgram: true,
+        __tnbGetSourceVersion: (fileName: string): string | undefined => {
+            return getBuilderMetaState()?.byHostFile.get(fileName)?.version;
+        },
+        __tnbIsProgramUptoDate: (_rootFileNames: readonly string[], currentOptions: any): boolean => {
+            // Structure-shape check (file set + structure-affecting options) —
+            // shared by tsserver and createLanguageService.
+            let shapes = typeof lsHost === "object" && lsHost !== null ? _programShapeByHost.get(lsHost) : undefined;
+            const shapeMap = shapes ?? _programShapeNoHost;
+            const prevShape = shapeMap.get(configFilePath);
+            if (!prevShape) return false;
+            const shapeFileNames = tsgoSourceFileNames(configFilePath, liveProject()).sortedNames;
+            if (!(
+                shapeFileNames.length > 0
+                && prevShape.fileNames.length === shapeFileNames.length
+                && prevShape.fileNames.every((n, i) => n === shapeFileNames[i])
+                && !ts.changesAffectModuleResolution(prevShape.options, currentOptions)
+                && !ts.optionsHaveChanges(prevShape.options, currentOptions, ts.sourceFileAffectingCompilerOptions)
+            )) {
+                return false;
+            }
+            // createLanguageService (non-projectService): a content-only edit has
+            // no structure change, so also check the per-program host-version
+            // snapshot captured in this program's scope (never sourceFile.version).
+            if (!tsserverWalk) {
+                if (!lsHostVersionSnapshot) return false;
+                for (const fn of lsHostVersionSnapshot.keys()) {
+                    const prev = lsHostVersionSnapshot.get(fn);
+                    const hv = lsHost?.getScriptVersion?.(fn);
+                    const cur = typeof hv === "string" && hv.length ? hv : "1";
+                    if (prev !== cur) return false;
+                }
+            }
+            return true;
+        },
+        __tnbSyncOverlay: (): void => {
+            if (tsserverWalk) _overlaySyncByConfig.get(configFilePath!)?.();
+        },
         getRootFileNames: () => collectTsgoOpenFileNames(programCtx.lsHost, rootNames as string[]),
         getCompilerOptions: () => options,
         getSourceFileNames,

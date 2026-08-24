@@ -2356,7 +2356,7 @@ index 0a45cc3e3e..a25ff3b71e 100644
  export function getDefinitionAndBoundSpan(program: Program, sourceFile: SourceFile, position: number): DefinitionInfoAndBoundSpan | undefined {
      const definitions = getDefinitionAtPosition(program, sourceFile, position);
 diff --git a/src/services/services.ts b/src/services/services.ts
-index 9885093ed6..b0a6e5b278 100644
+index 9885093ed6..043f2a36f2 100644
 --- a/src/services/services.ts
 +++ b/src/services/services.ts
 @@ -330,6 +330,9 @@ import {
@@ -2408,7 +2408,28 @@ index 9885093ed6..b0a6e5b278 100644
          let compilerHost: CompilerHost | undefined = {
              getSourceFile: getOrCreateSourceFile,
              getSourceFileByPath: getOrCreateSourceFileByPath,
-@@ -2034,9 +2055,15 @@ export function createLanguageService(
+@@ -1807,7 +1828,19 @@ export function createLanguageService(
+         let releasedScriptKinds: Set<Path> | undefined = new Set();
+ 
+         // If the program is already up-to-date, we can reuse it
+-        if (isProgramUptoDate(program, rootFileNames, newSettings, (_path, fileName) => host.getScriptVersion(fileName), fileName => compilerHost!.fileExists(fileName), hasInvalidatedResolutions, hasInvalidatedLibResolutions, hasChangedAutomaticTypeDirectiveNames, getParsedCommandLine, projectReferences)) {
++        const tsgoProgram: any = (program as any)?.isTsgoBackedProgram ? program : undefined;
++        // Thin-program gate: structure-shape for both tsserver and
++        // createLanguageService, plus a content (host script version) check for
++        // createLanguageService. Returns false when a rebuild is required.
++        const thinProgramUpToDate = !tsgoProgram || tsgoProgram.__tnbIsProgramUptoDate?.(rootFileNames, newSettings) === true;
++        const getSourceVersion = tsgoProgram
++            ? (_path: any, fileName: string) => {
++                const v = tsgoProgram.__tnbGetSourceVersion?.(fileName);
++                return v !== undefined ? v : host.getScriptVersion(fileName);
++            }
++            : (_path: any, fileName: string) => host.getScriptVersion(fileName);
++        if (thinProgramUpToDate && isProgramUptoDate(program, rootFileNames, newSettings, getSourceVersion, fileName => compilerHost!.fileExists(fileName), hasInvalidatedResolutions, hasInvalidatedLibResolutions, hasChangedAutomaticTypeDirectiveNames, getParsedCommandLine, projectReferences)) {
++            tsgoProgram?.__tnbSyncOverlay?.();
+             compilerHost = undefined;
+             parsedCommandLines = undefined;
+             releasedScriptKinds = undefined;
+@@ -2034,9 +2067,15 @@ export function createLanguageService(
  
      function cleanupSemanticCache(): void {
          if (program) {
@@ -2427,7 +2448,7 @@ index 9885093ed6..b0a6e5b278 100644
              program = undefined!; // TODO: GH#18217
          }
      }
-@@ -2232,6 +2259,14 @@ export function createLanguageService(
+@@ -2232,6 +2271,14 @@ export function createLanguageService(
      }
  
      function getCompletionsAtPosition(fileName: string, position: number, options: GetCompletionsAtPositionOptions = emptyOptions, formattingSettings?: FormatCodeSettings): CompletionInfo | undefined {
@@ -2442,7 +2463,7 @@ index 9885093ed6..b0a6e5b278 100644
          // Convert from deprecated options names to new names
          const fullPreferences: UserPreferences = {
              ...identity<UserPreferences>(options), // avoid excess property check
-@@ -2275,7 +2310,11 @@ export function createLanguageService(
+@@ -2275,7 +2322,11 @@ export function createLanguageService(
      }
  
      function getQuickInfoAtPosition(fileName: string, position: number, maximumLength?: number, verbosityLevel?: number): QuickInfo | undefined {
@@ -2454,7 +2475,7 @@ index 9885093ed6..b0a6e5b278 100644
  
          const sourceFile = getValidSourceFile(fileName);
          const node = getTouchingPropertyName(sourceFile, position);
-@@ -2402,6 +2441,9 @@ export function createLanguageService(
+@@ -2402,6 +2453,9 @@ export function createLanguageService(
      }
  
      function getDefinitionAndBoundSpan(fileName: string, position: number): DefinitionInfoAndBoundSpan | undefined {
@@ -2464,7 +2485,7 @@ index 9885093ed6..b0a6e5b278 100644
          synchronizeHostData();
          return GoToDefinition.getDefinitionAndBoundSpan(program, getValidSourceFile(fileName), position);
      }
-@@ -2430,6 +2472,10 @@ export function createLanguageService(
+@@ -2430,6 +2484,10 @@ export function createLanguageService(
      }
  
      function findRenameLocations(fileName: string, position: number, findInStrings: boolean, findInComments: boolean, preferences?: UserPreferences | boolean): RenameLocation[] | undefined {
@@ -2475,7 +2496,7 @@ index 9885093ed6..b0a6e5b278 100644
          synchronizeHostData();
          const sourceFile = getValidSourceFile(fileName);
          const node = getAdjustedRenameLocation(getTouchingPropertyName(sourceFile, position));
-@@ -2469,6 +2515,9 @@ export function createLanguageService(
+@@ -2469,6 +2527,9 @@ export function createLanguageService(
      }
  
      function findReferences(fileName: string, position: number): ReferencedSymbol[] | undefined {
@@ -2485,7 +2506,7 @@ index 9885093ed6..b0a6e5b278 100644
          synchronizeHostData();
          return FindAllReferences.findReferencedSymbols(program, cancellationToken, program.getSourceFiles(), getValidSourceFile(fileName), position);
      }
-@@ -2497,6 +2546,9 @@ export function createLanguageService(
+@@ -2497,6 +2558,9 @@ export function createLanguageService(
       * This is a semantic operation.
       */
      function getSignatureHelpItems(fileName: string, position: number, { triggerReason }: SignatureHelpItemsOptions = emptyOptions): SignatureHelpItems | undefined {
@@ -2495,7 +2516,7 @@ index 9885093ed6..b0a6e5b278 100644
          synchronizeHostData();
  
          const sourceFile = getValidSourceFile(fileName);
-@@ -3255,6 +3307,9 @@ export function createLanguageService(
+@@ -3255,6 +3319,9 @@ export function createLanguageService(
      }
  
      function getRenameInfo(fileName: string, position: number, preferences: UserPreferences | RenameInfoOptions | undefined): RenameInfo {
