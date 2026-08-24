@@ -9282,6 +9282,16 @@ function resolveNamelessDeclarationSymbol(n: any, project: any): any {
     return parentSym;
 }
 
+/** JS-side backing store for NodeHandle lazy cache slots (jsDoc, symbol,
+ * type, …). Stock NodeObject is a plain mutable object; these slots are
+ * written during lazy computation (e.g. services/jsDoc does
+ * `node.jsDoc ??= []`). The handle's structural getters are getter-only, so a
+ * plain assignment throws ("only a getter") — instead the setter caches here
+ * and the getter shadows the Go-side fall-through with the cached value.
+ * Module scope is load-bearing: the getters land once on the process-global
+ * NodeHandle.prototype and must outlive any single program generation. */
+const nodeHandleLazySlots = new WeakMap<object, Record<string, unknown>>();
+
 function installNodeHandleHooks(s: any): void {
     installRemoteNodeTraversalHooks();
     const proc = tnbBridgeProcessState();
@@ -9494,6 +9504,51 @@ function installNodeHandleHooks(s: any): void {
                 },
             });
         }
+    }
+    // Lazy cache slots — stock NodeObject is a plain mutable object and stock
+    // code writes these during lazy computation. The structural getters above
+    // (jsDoc/symbol/type) are getter-only, so `node.jsDoc ??= []` throws
+    // "only a getter" (services/jsDoc, ts-lit-plugin). Make each lazy slot
+    // writable with a JS-side WeakMap backing store: the getter returns the
+    // cached value when set, else falls through to the Go-side getter; the
+    // setter stores the JS-side value. Core AST fields (kind/pos/end/flags/
+    // parent) stay read-only.
+    const LAZY_CACHE_SLOTS = [
+        "jsDoc",              // JSDocContainer.jsDoc (types.ts:959) — services getJSDocTagsWorker writes node.jsDoc ??= []
+        "jsDocCache",         // JSDocArray.jsDocCache (types.ts:964) — array-level in stock; kept for parity
+        "symbol",             // Declaration.symbol (types.ts:1758)
+        "localSymbol",        // Declaration.localSymbol (types.ts:1759)
+        "locals",             // LocalsContainer.locals (types.ts:969)
+        "nextContainer",      // LocalsContainer.nextContainer (types.ts:970)
+        "flowNode",           // FlowContainer.flowNode (types.ts:975)
+        "endFlowNode",        // FunctionLike/ClassStaticBlock.endFlowNode (types.ts:2070/2177/4453)
+        "returnFlowNode",     // FunctionLike/ClassStaticBlock.returnFlowNode (types.ts:2071/2178/4453)
+        "type",               // type-carrying nodes (TypeNode/Expression.type)
+        "transformFlags",     // Node.transformFlags (types.ts:946)
+        "modifierFlagsCache", // Node.modifierFlagsCache (types.ts:945)
+        "emitNode",           // Node.emitNode (types.ts:950)
+        "original",           // Node.original (types.ts:949)
+    ];
+    for (const slot of LAZY_CACHE_SLOTS) {
+        const prev = Object.getOwnPropertyDescriptor(proto, slot);
+        if (typeof prev?.set === "function") continue; // already writable
+        const prevGet = typeof prev?.get === "function" ? prev.get : undefined;
+        Object.defineProperty(proto, slot, {
+            configurable: true,
+            get(this: any) {
+                const rec = nodeHandleLazySlots.get(this);
+                if (rec && slot in rec) return rec[slot];
+                return prevGet ? prevGet.call(this) : undefined;
+            },
+            set(this: any, value: any) {
+                let rec = nodeHandleLazySlots.get(this);
+                if (!rec) {
+                    rec = {};
+                    nodeHandleLazySlots.set(this, rec);
+                }
+                rec[slot] = value;
+            },
+        });
     }
     // getChildren / forEachChild — some rules walk declaration subtrees.
     for (const m of ["getChildren", "forEachChild", "getChildCount", "getFirstToken", "getLastToken"]) {
