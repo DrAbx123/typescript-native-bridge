@@ -1293,7 +1293,7 @@ index b639d488e..62c94e5da 100644
  	case ast.KindVariableDeclaration, ast.KindParameter, ast.KindPropertyDeclaration, ast.KindPropertySignature, ast.KindBindingElement:
  		return c.getContextualTypeForInitializerExpression(node, contextFlags)
 diff --git a/internal/checker/exports.go b/internal/checker/exports.go
-index 90162bdae..3da08ed33 100644
+index 90162bdae..4fdcc2a9f 100644
 --- a/internal/checker/exports.go
 +++ b/internal/checker/exports.go
 @@ -3,7 +3,9 @@ package checker
@@ -1582,8 +1582,8 @@ index 90162bdae..3da08ed33 100644
 +
 +	restType := c.GetTypeOfSymbol(restParameter)
 +	if restType.IsTupleType() {
-+		associatedNames := make([]*ast.Node, 0, len(restType.Target().AsTupleType().ElementInfos()))
-+		for _, elementInfo := range restType.Target().AsTupleType().ElementInfos() {
++		associatedNames := make([]*ast.Node, 0, len(restType.Target().AsTupleType().ElementInfos())) // asguard:exempt IsTupleType() guard above: the tuple target carries *TupleType data (newObjectType Tuple case)
++		for _, elementInfo := range restType.Target().AsTupleType().ElementInfos() {                  // asguard:exempt IsTupleType() guard above: the tuple target carries *TupleType data (newObjectType Tuple case)
 +			labeledElement := elementInfo.LabeledDeclaration()
 +			associatedNames = append(associatedNames, labeledElement)
 +		}

@@ -109,6 +109,7 @@ jobs:
         run: |
           npm run check:lib
           npm run check:enums
+          npm run check:go-as-guards
 
       # V8-sandbox failure class: the bridge's binary path must work under
       # Electron (VS Code's tsserver host) — invisible to every Node-only gate

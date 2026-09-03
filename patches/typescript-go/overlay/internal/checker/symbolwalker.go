@@ -85,7 +85,7 @@ func (w *symbolWalker) visitUnionOrIntersectionType(t *Type) {
 }
 
 func (w *symbolWalker) visitIndexType(t *Type) {
-	w.visitType(t.AsIndexType().target)
+	w.visitType(t.AsIndexType().target) // asguard:exempt reached only via visitType's TypeFlagsIndex dispatch; newIndexType pairs the flag with *IndexType data
 }
 
 func (w *symbolWalker) visitIndexedAccessType(t *Type) {

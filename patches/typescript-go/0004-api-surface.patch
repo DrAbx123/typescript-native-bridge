@@ -4424,7 +4424,7 @@ index 6a90030eb..fc58b512a 100644
      const docFiles = {
          "/tsconfig.json": JSON.stringify({ compilerOptions: { strict: true } }),
 diff --git a/internal/api/proto.go b/internal/api/proto.go
-index 0917c385d..f3245b617 100644
+index 0917c385d..8f640c977 100644
 --- a/internal/api/proto.go
 +++ b/internal/api/proto.go
 @@ -67,37 +67,81 @@ const (
@@ -5377,7 +5377,7 @@ index 0917c385d..f3245b617 100644
 -			}
 -			if ref.Target() != nil {
 -				resp.Target = TypeHandle(ref.Target())
-+			ref := t.AsTypeReference()
++			ref := t.AsTypeReference() // asguard:exempt ObjectFlagsReference implies data embeds TypeReference (newObjectType: InterfaceType/TupleType/TypeReference)
 +			if target := ref.Target(); target != nil {
 +				resp.Target = TypeHandle(target)
 +				// Mirror checker.isTupleType: tuple-ness is a property of the
@@ -5411,7 +5411,7 @@ index 0917c385d..f3245b617 100644
  	case flags&checker.TypeFlagsTypeParameter != 0:
  		resp.IsThisType = t.AsTypeParameter().IsThisType()
 +	case flags&checker.TypeFlagsUniqueESSymbol != 0:
-+		resp.EscapedName = uniqueSymbolEscapedName(t.AsUniqueESSymbolType().Name())
++		resp.EscapedName = uniqueSymbolEscapedName(t.AsUniqueESSymbolType().Name()) // asguard:exempt case arm on TypeFlagsUniqueESSymbol; newUniqueESSymbolType pairs the flag with *UniqueESSymbolType data
  	case flags&checker.TypeFlagsIntrinsic != 0:
  		resp.IntrinsicName = t.AsIntrinsicType().IntrinsicName()
  	}
@@ -6195,7 +6195,7 @@ index 0917c385d..f3245b617 100644
  type GetProjectDiagnosticsParams struct {
  	Snapshot SnapshotID `json:"snapshot"`
 diff --git a/internal/api/session.go b/internal/api/session.go
-index 7e29c44b6..5b794f286 100644
+index 7e29c44b6..eb237f5b4 100644
 --- a/internal/api/session.go
 +++ b/internal/api/session.go
 @@ -3,6 +3,7 @@ package api
@@ -8015,6 +8015,8 @@ index 7e29c44b6..5b794f286 100644
 +	defer setup.done()
  
 -func (s *Session) handleGetRegularTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
+-	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsLiteralType().RegularType() })
+-}
 +	results := make([]*SymbolResponse, len(params.Locations))
 +	for i, loc := range params.Locations {
 +		node, err := setup.sd.resolveNodeHandle(setup.program, loc)
@@ -8660,29 +8662,27 @@ index 7e29c44b6..5b794f286 100644
 +}
 +
 +func (s *Session) handleGetFreshTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
-+	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsLiteralType().FreshType() })
++	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsLiteralType().FreshType() }) // asguard:exempt registry identity: the JS accessor fires only when the wire record carries freshType, already cast from this *Type in newTypeResponse
 +}
 +
 +func (s *Session) handleGetRegularTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
- 	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsLiteralType().RegularType() })
- }
- 
--func (s *Session) handleGetTypesOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
--	return s.resolveTypeArrayPropertyOfType(params, (*checker.Type).Types)
++	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsLiteralType().RegularType() }) // asguard:exempt registry identity: JS reads this field only when newTypeResponse emitted it from this same *Type
++}
++
 +func (s *Session) handleGetTypesOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
 +	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.Types() })
 +}
 +
 +func (s *Session) handleGetTypeParametersOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
-+	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().TypeParameters() })
++	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().TypeParameters() }) // asguard:exempt registry identity: JS reads this field only when newTypeResponse emitted it from this same *Type
 +}
 +
 +func (s *Session) handleGetOuterTypeParametersOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
-+	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().OuterTypeParameters() })
++	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().OuterTypeParameters() }) // asguard:exempt registry identity: JS reads this field only when newTypeResponse emitted it from this same *Type
 +}
 +
 +func (s *Session) handleGetLocalTypeParametersOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
-+	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().LocalTypeParameters() })
++	return s.resolveTypeArrayPropertyOfType(params, func(t *checker.Type) []*checker.Type { return t.AsInterfaceType().LocalTypeParameters() }) // asguard:exempt registry identity: JS reads this field only when newTypeResponse emitted it from this same *Type
 +}
 +
 +func (s *Session) handleGetAliasTypeArgumentsOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
@@ -8704,27 +8704,27 @@ index 7e29c44b6..5b794f286 100644
 +}
 +
 +func (s *Session) handleGetObjectTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
-+	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsIndexedAccessType().ObjectType() })
++	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsIndexedAccessType().ObjectType() }) // asguard:exempt registry identity: JS reads this field only when newTypeResponse emitted it from this same *Type
 +}
 +
 +func (s *Session) handleGetIndexTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
-+	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsIndexedAccessType().IndexType() })
++	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsIndexedAccessType().IndexType() }) // asguard:exempt registry identity: JS reads this field only when newTypeResponse emitted it from this same *Type
 +}
 +
 +func (s *Session) handleGetCheckTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
-+	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsConditionalType().CheckType() })
++	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsConditionalType().CheckType() }) // asguard:exempt registry identity: JS reads this field only when newTypeResponse emitted it from this same *Type
 +}
 +
 +func (s *Session) handleGetExtendsTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
-+	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsConditionalType().ExtendsType() })
++	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsConditionalType().ExtendsType() }) // asguard:exempt registry identity: JS reads this field only when newTypeResponse emitted it from this same *Type
 +}
 +
 +func (s *Session) handleGetBaseTypeOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
-+	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsSubstitutionType().BaseType() })
++	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsSubstitutionType().BaseType() }) // asguard:exempt registry identity: JS reads this field only when newTypeResponse emitted it from this same *Type
 +}
 +
 +func (s *Session) handleGetConstraintOfType(_ context.Context, params *GetTypePropertyParams) (*TypeResponse, error) {
-+	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsSubstitutionType().SubstConstraint() })
++	return s.resolveTypePropertyOfType(params, func(t *checker.Type) *checker.Type { return t.AsSubstitutionType().SubstConstraint() }) // asguard:exempt registry identity: JS reads this field only when newTypeResponse emitted it from this same *Type
 +}
 +
 +func (s *Session) handleGetTypeParametersOfSignature(_ context.Context, params *GetSignaturePropertyParams) ([]*TypeResponse, error) {
@@ -10500,7 +10500,9 @@ index 7e29c44b6..5b794f286 100644
 +	}
 +	return setup.checker.SymbolIsValue(symbol), nil
 +}
-+
+ 
+-func (s *Session) handleGetTypesOfType(_ context.Context, params *GetTypePropertyParams) ([]*TypeResponse, error) {
+-	return s.resolveTypeArrayPropertyOfType(params, (*checker.Type).Types)
 +// handleRequiresAddingImplicitUndefined reports whether a parameter needs implicit undefined.
 +func (s *Session) handleRequiresAddingImplicitUndefined(ctx context.Context, params *CheckerNodeParams) (bool, error) {
 +	setup, err := s.setupChecker(ctx, params.Snapshot, params.Project)

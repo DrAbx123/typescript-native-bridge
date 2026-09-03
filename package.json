@@ -34,6 +34,7 @@
 		"save-ts-patches": "node tools/save-typescript-patches.js",
 		"bump:version": "node tools/bump-version.mjs",
 		"check:enums": "node tools/check-enum-remap.mjs",
+		"check:go-as-guards": "node tools/check-go-as-guards.mjs",
 		"check:lib-sync": "node tools/check-lib-sync.mjs",
 		"check:bundle-shape": "node tools/check-bundle-shape.mjs",
 		"check:sourcefile-guard": "node tools/check-sourcefile-guard.mjs",

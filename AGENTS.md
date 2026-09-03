@@ -31,6 +31,7 @@ TNB is a tsgo-backed TypeScript fork: upstream `microsoft/TypeScript` and `micro
 ## Gates (run before committing behavior changes)
 
 - `npm run check:lib` / `check:enums` / `check:sourcefile-guard`
+- `npm run check:go-as-guards` — Go-side Type-cast guard: every `Type.As*()` chain deref and unguarded nil-family assignment in the tsgo patches/overlay is fixed or carries an inline `// asguard:exempt` reason (issues #69/#70 bug class)
 - Witnesses: 82 across wg0–wg6, all wired in CI (`.github/workflows/ci.yml`), single source of truth `tools/ci-witness-groups.mjs` — `node tools/ci-witness-groups.mjs all` validates dup/missing/orphan/local-only/baseline wiring and emits the matrix (`matrix` mode feeds the ci.yml prepare job).
 - Local-only — run on demand, not in the matrix (reasons in the matrix header comment): framework-checks, external-edits, generation-retention, napi-fuzz, completion-latency, postedit-latency, perf-edit-rpc, perf-qi-rpc, typing-cpuprof.
 - Semantic witnesses (the rest of the matrix is bare stock-parity checks):
