@@ -40,7 +40,7 @@ func (c *Checker) GetMemberOverrideModifierStatus(
 	if baseTypeNode != nil {
 		baseTypes := c.getBaseTypes(t)
 		if len(baseTypes) > 0 {
-			baseWithThis = c.getTypeWithThisArgument(core.FirstOrNil(baseTypes), t.AsInterfaceType().thisType, false)
+			baseWithThis = c.getTypeWithThisArgument(core.FirstOrNil(baseTypes), t.ThisType(), false)
 		}
 	}
 	baseStaticType := c.getBaseConstructorTypeOfClass(t)

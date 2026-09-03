@@ -121,7 +121,13 @@ func (w *symbolWalker) visitSignature(signature *Signature) {
 
 func (w *symbolWalker) visitInterfaceType(t *Type) {
 	w.visitObjectType(t)
+	// Stock reads (type as InterfaceType).typeParameters/.thisType, which are
+	// undefined no-ops on a reference; AsInterfaceType is nil there, so gate on
+	// the data shape instead of trusting the Class|Interface flags.
 	iface := t.AsInterfaceType()
+	if iface == nil {
+		return
+	}
 	for _, tp := range iface.TypeParameters() {
 		w.visitType(tp)
 	}
