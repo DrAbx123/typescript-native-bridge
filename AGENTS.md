@@ -31,7 +31,7 @@ TNB is a tsgo-backed TypeScript fork: upstream `microsoft/TypeScript` and `micro
 ## Gates (run before committing behavior changes)
 
 - `npm run check:lib` / `check:enums` / `check:sourcefile-guard`
-- Witnesses: 81 across wg0–wg6, all wired in CI (`.github/workflows/ci.yml`), single source of truth `tools/ci-witness-groups.mjs` — `node tools/ci-witness-groups.mjs all` validates dup/missing/orphan/local-only/baseline wiring and emits the matrix (`matrix` mode feeds the ci.yml prepare job).
+- Witnesses: 82 across wg0–wg6, all wired in CI (`.github/workflows/ci.yml`), single source of truth `tools/ci-witness-groups.mjs` — `node tools/ci-witness-groups.mjs all` validates dup/missing/orphan/local-only/baseline wiring and emits the matrix (`matrix` mode feeds the ci.yml prepare job).
 - Local-only — run on demand, not in the matrix (reasons in the matrix header comment): framework-checks, external-edits, generation-retention, napi-fuzz, completion-latency, postedit-latency, perf-edit-rpc, perf-qi-rpc, typing-cpuprof.
 - Semantic witnesses (the rest of the matrix is bare stock-parity checks):
   - `triage-crossgen-reuse` — issue #11: cross-generation RemoteSourceFile reuse + edit invalidation; a pre-edit type handle must die, not re-resolve
@@ -46,6 +46,7 @@ TNB is a tsgo-backed TypeScript fork: upstream `microsoft/TypeScript` and `micro
   - `triage-bridge-thread-race` — worker_threads hosts: cross-thread text-response integrity + teardown-unload survival
   - `triage-eslint-typeref-target` — issue #35: isTypeReference→target→getSymbol() reads back registry-identical objects
   - `triage-thistype-refguard` — issues #69/#70: ThisType() gates on the data shape, not objectFlags (cloned tuple references carry the Tuple flag with *TypeReference data); per-node thisType parity vs stock
+  - `triage-importclause-nil-symbol` — issue #71: type-only ImportClause is a symbol-less IsTypeDeclaration; getTypeAtLocation must yield the error type, not a Go panic
   - `triage-custom-transformers` — issue #40: emit with non-empty customTransformers must throw (tsgo can't execute JS transformers)
   - `triage-ambient-order` — issue #42 class: ambient-module index run-stable (Go map order must not leak onto the wire)
   - `triage-diag-determinism` — issues #42/#51: whole-program diagnostics byte-identical across fresh runs (strided checker assignment)

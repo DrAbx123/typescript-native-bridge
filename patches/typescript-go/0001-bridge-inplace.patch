@@ -960,7 +960,7 @@ index 91aab0904..48b7cabb1 100644
  	assert.NilError(t, err)
  
 diff --git a/internal/checker/checker.go b/internal/checker/checker.go
-index b639d488e..4d00c1904 100644
+index b639d488e..62c94e5da 100644
 --- a/internal/checker/checker.go
 +++ b/internal/checker/checker.go
 @@ -786,6 +786,7 @@ type Checker struct {
@@ -1263,7 +1263,22 @@ index b639d488e..4d00c1904 100644
  	default:
  		return c.errorType
  	}
-@@ -29109,6 +29275,13 @@ func (c *Checker) getContextualType(node *ast.Node, contextFlags ContextFlags) *
+@@ -23584,6 +23750,14 @@ func (c *Checker) getDeclaredTypeOfSymbol(symbol *ast.Symbol) *Type {
+ }
+ 
+ func (c *Checker) tryGetDeclaredTypeOfSymbol(symbol *ast.Symbol) *Type {
++	// A symbol-less type declaration (e.g. a type-only ImportClause, which
++	// IsTypeDeclaration covers but the binder never gives a symbol) arrives
++	// here via getTypeOfNode; stock throws a catchable TypeError on the same
++	// call, a Go nil-deref is process-fatal on the NAPI boundary (issue #71).
++	// Ledger(tsgo-declaredtype-nil-symbol) — README behavior table row.
++	if symbol == nil {
++		return nil
++	}
+ 	switch {
+ 	case symbol.Flags&(ast.SymbolFlagsClass|ast.SymbolFlagsInterface) != 0:
+ 		return c.getDeclaredTypeOfClassOrInterface(symbol)
+@@ -29109,6 +29283,13 @@ func (c *Checker) getContextualType(node *ast.Node, contextFlags ContextFlags) *
  		return c.contextualInfos[index].t
  	}
  	parent := node.Parent

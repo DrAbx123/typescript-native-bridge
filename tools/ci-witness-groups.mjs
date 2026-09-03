@@ -40,7 +40,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const TOTAL = 81;
+const TOTAL = 82;
 
 // Witnesses intentionally NOT in the matrix — run on demand (reasons above).
 const LOCAL_ONLY = [
@@ -167,6 +167,7 @@ const groups = [
 					'triage-jsdoc-writable', // ~1s
 					'triage-semantic-highlight-edit', // ~2s
 			'triage-thistype-refguard', // ~1s (issues #69/#70)
+			'triage-importclause-nil-symbol', // ~0s (issue #71)
 		],
 	},
 	{
