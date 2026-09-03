@@ -81,12 +81,49 @@
  * U3 (alias-chain shape) is a structural difference, not an ordering one, and
  * is not shape-checked.
  *
+ * --full-walk (wired as triage-checker-fullwalk.mjs) turns the probe from a
+ * hand-picked point list into an exhaustive walk. Every node of every corpus
+ * file (never lib files) runs the same batteries — labels are
+ * `${relFile}:${pos}:${SyntaxKind[kind]}` (byte-identical corpus ⇒ identical
+ * on both sides) — plus three additions:
+ *   F1  the 14-field NESTED lazy-accessor closure (target/thisType/freshType/
+ *       regularType/objectType/indexType/checkType/extendsType/baseType/
+ *       substConstraint + the four typeParameters arrays, parsed from
+ *       tsgoChecker.ts so the prop list has no second home): every type
+ *       returned by getTypeAtLocation / getTypeOfSymbolAtLocation /
+ *       getDeclaredTypeOfSymbol reads all 14 fields. A wire-present field
+ *       fires the registry RPC, which is what flushes the Go-side As*()
+ *       nil-cast class (#69/#70/#71) out into the open — a panic is
+ *       process-fatal in the bridge, a JS throw canonicalizes to { $err }.
+ *       One level only: field-read results are canonType'd, never re-closed.
+ *   F2  order-insensitive canon — the curated U1/U2/LU2 exemptions could not
+ *       survive an exhaustive walk (they'd fire on every union/member list),
+ *       so the normalizations move into canon: type strings (canonType.s,
+ *       canonSig strings, both typeToString variants) are LU2-renamed,
+ *       truncation-tail-stripped and sorted into the union multiset at every
+ *       depth; member/symbol lists (getPropertiesOfType /
+ *       getApparentProperties / getExportsOfModule) are sorted by stable()
+ *       key. Ordered stays ordered where the order is semantic: signature
+ *       params, overload lists, alias chains. Curated canon is untouched.
+ *   F3  crash isolation — the tnb side runs ONE CHILD PER CORPUS FILE
+ *       (TNB_DIFF_FILE=<rel>), so a Go panic in one file cannot hide the
+ *       rest: the parent collects every crash in one run (CRASH <file> +
+ *       stderr tail), the walk continues, and the final VERDICT is FAIL.
+ *       The stock side stays one child (stock field reads are plain JS).
+ * Full-walk also gates RPC-method coverage mechanically: every method the
+ * JS side can call (ARENA_METHODS + the JSON-path literals in
+ * tsgoChecker.ts, cross-checked against the Go surface in proto.go) must
+ * have a COVERAGE entry (battery / field:<prop> / symbol-battery /
+ * spec-battery / module-battery / exempt: <reason>) — a new RPC method
+ * shipping unwalked turns the gate red.
+ *
  * Usage: node tools/triage-checker-differential.mjs
  *        node tools/triage-checker-differential.mjs --self-test
+ *        node tools/triage-checker-differential.mjs --full-walk
  * Stock side: STOCK_TYPESCRIPT_PATH, else derived from STOCK_TSSERVER_PATH
  * (CI), else /tmp/stock-ts-p3/package/lib/typescript.js.
  */
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -155,6 +192,71 @@ const KNOWN_DIVERGENCES = new Map((() => {
 	return keys;
 })());
 
+// ── Full-walk known divergences (method@label → class reason) ─────────────
+// Curated keys don't transfer: full-walk labels are generated (file:pos:kind),
+// and the ordering classes are baked into canon (F2 above). What remains
+// keyed is the shape-class residuals that canon cannot express — same
+// stale-fail semantics as KNOWN_DIVERGENCES, consulted only in --full-walk.
+// Each class is attributed to its mechanism; the FW/J* classes are value
+// shapes (unchecked, like U3). The JS classes were surfaced by the walk's
+// new js/ corpus (checkJs path) — engine-model differences, attribution to
+// be confirmed against pristine tsgo before treating any as a bridge bug.
+const FW_KEYOF_TARGET = 'FW: keyof-type target — the bridge carries target on the keyof type, stock leaves it absent (field-model delta)';
+const FW_MAPPED_TARGET = 'FW: mapped-instantiation target — stock links the anonymous source via target, tsgo has no Reference-style target for mapped types (triage-type-field-audit conditionalExemption)';
+const FW_TUPLE_ELISION = 'FW: instantiated-tuple display — stock renders tuple references as [...] inside signature instantiations, tsgo renders the element types (stock tuple-reference display model)';
+const ERR_ABS = 'ERR: errored declaration resolution — stock resolves the abstract-instantiation error to the error type (rendered any), tsgo keeps the declared class type (engine error-type model on erroneous programs)';
+const JS_MODEL = 'JS: CJS module model — tsgo shapes module/exports symbols and require-destructured types differently from stock (exports = Property|ModuleExports vs ValueModule; module type = export object vs typeof import; literal widening through destructuring); engine checkJs model, pristine-tsgo attribution pending';
+const JS_ALIAS = 'JS: require-destructured binding model — stock models the binding as an alias symbol over the module export member, tsgo binds the member directly (alias model, checkJs path; pristine-tsgo attribution pending)';
+const FULLWALK_KNOWN = new Map((() => {
+	const keys = [];
+	const add = (reason, methods, points) => {
+		for (const m of methods) for (const at of points) keys.push([`${m}@${at}`, reason]);
+	};
+	add(REASON.U3,
+		["getImmediateAliasedSymbol.chain"],
+		["cjs/use.ts:6:Identifier", "cjs/use.ts:55:Identifier", "cjs/use.ts:103:Identifier", "cjs/use.ts:112:Identifier"]);
+	add(ERR_ABS,
+		["getTypeAtLocation", "typeToString", "typeToString[NoTrunc]", "getApparentType", "getPropertiesOfType", "getApparentProperties"],
+		["errors.ts:265:VariableDeclaration", "errors.ts:265:Identifier", "errors.ts:271:NewExpression"]);
+	add(ERR_ABS,
+		["field:target", "field:thisType"],
+		["errors.ts:265:VariableDeclaration[t]", "errors.ts:265:Identifier[t]", "errors.ts:265:Identifier[t1]", "errors.ts:271:NewExpression[t]"]);
+	add(ERR_ABS,
+		["getTypeOfSymbolAtLocation"],
+		["errors.ts:265:Identifier"]);
+	add(FW_MAPPED_TARGET,
+		["field:target"],
+		["types.ts:1417:VariableDeclaration[t]", "types.ts:1417:Identifier[t]", "types.ts:1417:Identifier[t1]", "types.ts:1425:TypeReference[t]"]);
+	add(FW_KEYOF_TARGET,
+		["field:target"],
+		["types.ts:191:TypeOperator[t]"]);
+	add(FW_TUPLE_ELISION,
+		["getPropertiesOfType", "getApparentProperties"],
+		["types.ts:1128:Parameter", "types.ts:1128:Identifier", "types.ts:1133:TupleType", "types.ts:1188:Identifier"]);
+	add(JS_MODEL,
+		["getSymbolAtLocation[module]", "getExportsOfModule", "getTypeOfSymbolAtLocation[module]"],
+		["js/consumer.js:0:SourceFile", "js/plain.js:0:SourceFile"]);
+	add(JS_MODEL,
+		["getSymbolAtLocation", "getTypeOfSymbolAtLocation"],
+		["js/consumer.js:126:Identifier", "js/consumer.js:126:PropertyAccessExpression", "js/consumer.js:134:Identifier", "js/plain.js:282:Identifier", "js/plain.js:282:PropertyAccessExpression", "js/plain.js:290:Identifier"]);
+	add(JS_MODEL,
+		["getTypeAtLocation", "typeToString", "typeToString[NoTrunc]", "getApparentType", "getPropertiesOfType", "getApparentProperties"],
+		["js/consumer.js:126:BinaryExpression", "js/consumer.js:126:Identifier", "js/consumer.js:126:PropertyAccessExpression", "js/consumer.js:134:Identifier", "js/plain.js:282:BinaryExpression", "js/plain.js:282:Identifier", "js/plain.js:282:PropertyAccessExpression", "js/plain.js:290:Identifier", "js/consumer.js:5:ObjectBindingPattern", "js/consumer.js:39:CallExpression"]);
+	add(JS_MODEL,
+		["getTypeAtLocation", "typeToString", "typeToString[NoTrunc]"],
+		["js/consumer.js:26:BindingElement", "js/consumer.js:26:Identifier"]);
+	add(JS_MODEL,
+		["getTypeOfSymbolAtLocation"],
+		["js/consumer.js:26:Identifier"]);
+	add(JS_MODEL,
+		["getExportsOfModule"],
+		["js/consumer.js:48:StringLiteral"]);
+	add(JS_ALIAS,
+		["getAliasedSymbol", "getImmediateAliasedSymbol.chain"],
+		["js/consumer.js:7:Identifier", "js/consumer.js:18:Identifier", "js/consumer.js:26:Identifier", "js/consumer.js:31:Identifier", "js/consumer.js:71:Identifier", "js/consumer.js:98:Identifier", "js/consumer.js:119:Identifier"]);
+	return keys;
+})());
+
 // ── Corpus ─────────────────────────────────────────────────────────────────
 const MAIN_TSCONFIG = {
 	compilerOptions: {
@@ -169,6 +271,14 @@ const CJS_TSCONFIG = {
 		strict: true, noEmit: true, skipLibCheck: true, types: [],
 	},
 	files: ['cjs/equal.ts', 'cjs/use.ts'],
+};
+const JS_TSCONFIG = {
+	compilerOptions: {
+		target: 'es2022', lib: ['es2022'], module: 'commonjs',
+		strict: true, noEmit: true, skipLibCheck: true, types: [],
+		allowJs: true, checkJs: true,
+	},
+	include: ['js/**/*'],
 };
 const CORPUS = {
 	'util.ts': `export function add(a: number, b: number): number { return a + b; }
@@ -265,6 +375,64 @@ export const e = new Equal(1);
 export const s = e.method();
 export { Equal as EqualAlias };
 `,
+	// error-type shapes through every API: unresolved ref, circular heritage,
+	// duplicate declarations, wrong-type assignment, abstract instantiation
+	'errors.ts': `const missing: Missing = undefined;
+class A extends B {}
+class B extends A {}
+function dupFn(x: string): number;
+function dupFn(x: string): number { return 1; }
+const dup = 1;
+const dup = 2;
+const n: number = 'oops';
+abstract class Abs { abstract m(): void; }
+const abs = new Abs();
+`,
+	// ambient declarations: class/function/namespace/enum, overloads, merging
+	'shapes.d.ts': `declare class K {
+  static s: string;
+  m(): number;
+}
+declare function f(a: string): number;
+declare function f(a: number): string;
+declare namespace NS { const v: number; }
+declare enum E { A, B }
+interface I { x: string }
+interface I { y: number }
+export default K;
+export { f, NS, E, I };
+`,
+	// global interface augmentation — symmetrically extends String member
+	// lists on both sides; curated LU2 entries stay order/rename-divergent
+	'globalaug.ts': `export {};
+declare global {
+  interface String { tnbProbe(): number; }
+}
+const s = 'x';
+export const probe: number = s.tnbProbe();
+`,
+	// JS project (checkJs): JSDoc-typed exports, object literals (JSLiteral
+	// objectFlags), module.exports — exercised through the js/ config only
+	'js/plain.js': `/**
+ * @typedef {{ id: string, tags: string[] }} Entity
+ */
+/**
+ * @param {string} key
+ * @returns {Promise<string>}
+ */
+async function fetchData(key) { return key; }
+/** @type {Entity} */
+const entity = { id: 'a', tags: ['x'] };
+const lit = 'hello';
+const obj = { a: 1, b: 'two' };
+module.exports = { fetchData, entity, lit, obj };
+`,
+	'js/consumer.js': `const { fetchData, entity, lit, obj } = require('./plain');
+const out = fetchData('k');
+const id = entity.id;
+const a = obj.a;
+module.exports = { out, id, a, lit };
+`,
 };
 
 // ── Probe points ───────────────────────────────────────────────────────────
@@ -345,6 +513,217 @@ const POINTS = [
 	{ proj: 'cjs', file: 'cjs/use.ts', label: 'cjs/use.ts:spec-equal', needle: "'./equal'", spec: true },
 ];
 
+// ── Full-walk machinery ─────────────────────────────────────────────────────
+// TNB_DIFF_FULLWALK=1 marks a child; TNB_DIFF_FILE=<rel> scopes a tnb child
+// to one corpus file (crash isolation: a Go panic is process-fatal, so one
+// file per child lets the parent collect every crash in a single run).
+const FULLWALK = process.argv.includes('--full-walk') || process.env.TNB_DIFF_FULLWALK === '1';
+const FULLWALK_FILE = process.env.TNB_DIFF_FILE;
+const projOfFile = rel => (rel.startsWith('cjs/') ? 'cjs' : rel.startsWith('js/') ? 'js' : 'main');
+// Fixed concatenation order for both sides: project order, then sorted rel.
+// The parent re-concatenates per-file children in exactly this order.
+const FULLWALK_FILES = ['main', 'cjs', 'js'].flatMap(proj =>
+	Object.keys(CORPUS).filter(rel => projOfFile(rel) === proj).sort());
+// Comp.vue is the issue-#26 shadow: it exists on disk only so the resolution
+// can prefer the phantom declaration Comp.d.vue.ts — no program ever owns
+// it, so the walk (which enumerates program files) must skip it. The child
+// asserts both halves of that split so a corpus drift stays loud.
+const FULLWALK_NO_PROGRAM = new Set(['Comp.vue']);
+// Stock's getSymbolAtLocation switch (checker.ts, 6.0.3) — the kinds its
+// contract actually resolves. On every other kind stock returns undefined
+// while tsgo's handler returns the node's symbol (engine permissiveness:
+// ExportAssignment/Parameter/TemplateSpan/… — not a bridge bug, and no
+// consumer queries those kinds), so probing them compares stock's null
+// against a tsgo extension. The symbol battery runs on the contract kinds
+// only; the type battery runs everywhere stock's getTypeOfNode computes a
+// real type (everything but ImportClause/ExportAssignment, where stock
+// returns errorType — or throws, state-dependently — while tsgo computes
+// the real type).
+const SYMBOL_CONTRACT_KINDS = new Set([
+	'Identifier', 'PrivateIdentifier', 'PropertyAccessExpression', 'QualifiedName',
+	'ThisKeyword', 'ThisType', 'SuperKeyword', 'ConstructorKeyword',
+	'StringLiteral', 'NoSubstitutionTemplateLiteral', 'NumericLiteral',
+	'DefaultKeyword', 'FunctionKeyword', 'EqualsGreaterThanToken', 'ClassKeyword',
+	'ImportType', 'ExportKeyword', 'ImportKeyword', 'NewKeyword', 'InstanceOfKeyword',
+	'MetaProperty', 'JsxNamespacedName',
+]);
+const TYPE_SKIP_KINDS = new Set(['ImportClause', 'ExportAssignment']);
+
+// The NESTED field tables are the single source of truth for the field
+// closure (F1) — parse them off tsgoChecker.ts so the 14 prop names have no
+// second home; the parent's COVERAGE gate cross-checks the same parse.
+function parseNestedTables() {
+	const src = fs.readFileSync(path.join(repoRoot, 'patches', 'typescript', 'overlay', 'src', 'compiler', 'tsgoChecker.ts'), 'utf8');
+	const rows = [];
+	for (const table of ['NESTED_TYPE_SINGLE', 'NESTED_TYPE_ARRAY']) {
+		const start = src.indexOf(`const ${table}`);
+		if (start < 0) throw new Error(`no ${table} table in tsgoChecker.ts`);
+		const end = src.indexOf('];', start);
+		const block = src.slice(start, end);
+		for (const m of block.matchAll(/\[\s*"([A-Za-z0-9]+)"\s*,\s*"([A-Za-z0-9]+)"\s*\]/g)) rows.push([m[1], m[2]]);
+	}
+	if (rows.length === 0) throw new Error('parsed no NESTED rows from tsgoChecker.ts');
+	return rows;
+}
+const FULLWALK_NESTED = FULLWALK ? parseNestedTables() : null;
+
+// F2 canon helpers (full-walk only): union-constituent multiset + member-list
+// order. Inert outside full-walk — curated canon is untouched. The
+// unresolved-error marker is stock-only rendering (stock typeToString of an
+// unresolved error type is "/*unresolved*/ any"; tsgo renders "any" — engine
+// error-type model), normalized like the LU2 rename.
+// Truncation tails are the U2T residual: a typeToString with 100+ members
+// keeps the visible head/tail in member order (stock resolution order vs
+// tsgo table order — upstream #200 class), so the same member set prints
+// different visible members. The marker survives, the order-dependent
+// members around it do not; the full member set still compares through the
+// member-list recs, so a dropped member cannot hide here.
+function stripTruncatedMembers(s) {
+	for (;;) {
+		const m = s.match(/\.\.\. \d+ more \.\.\./);
+		if (!m) return s;
+		const i = m.index;
+		let open = -1;
+		for (let j = i - 1, depth = 0, str = null, tpl = false; j >= 0; j--) {
+			const c = s[j];
+			if (str) { if (c === str && s[j - 1] !== '\\') str = null; continue; }
+			if (tpl) { if (c === '`') tpl = false; continue; }
+			if (c === "'" || c === '"') { str = c; continue; }
+			if (c === '`') { tpl = true; continue; }
+			if (c === '}') depth++;
+			else if (c === '{') { depth--; if (depth < 0) { open = j; break; } }
+		}
+		if (open < 0) return s;
+		let close = -1;
+		for (let j = open + 1, depth = 1, str = null, tpl = false; j < s.length; j++) {
+			const c = s[j];
+			if (str) { if (c === str && s[j - 1] !== '\\') str = null; continue; }
+			if (tpl) { if (c === '`') tpl = false; continue; }
+			if (c === "'" || c === '"') { str = c; continue; }
+			if (c === '`') { tpl = true; continue; }
+			if (c === '{') depth++;
+			else if (c === '}') { depth--; if (depth === 0) { close = j; break; } }
+		}
+		if (close < 0) return s;
+		s = s.slice(0, open + 1) + ' … ' + s.slice(close);
+	}
+}
+// Depth-aware union multiset canon (full-walk only): U1 order divergences
+// appear inside signatures and member annotations too ("readonly string[] |
+// ArrayLike<string>"), where the top-level splitUnion cannot see them. This
+// recurses into bracket groups — brace regions are member lists (their
+// ';'-separated members recurse individually, member order stays compared),
+// paren/bracket/angle regions recurse as one expression — and sorts the '|'
+// constituents at every depth. A constituent that carries a leading context
+// prefix (`name: `, `name?: `, `S extends `, `T = `) keeps the prefix on the
+// sorted union. Known limitation (accepted, splitUnion-class): a conditional
+// `T extends U ? X : Y | Z` normalizes as `T extends U ? X : (Y | Z)` — a
+// false pass on that ambiguous rendering, never a false failure.
+function consumeBalanced(s, openIdx) {
+	const open = s[openIdx];
+	const close = open === '(' ? ')' : open === '[' ? ']' : open === '<' ? '>' : '}';
+	let depth = 1;
+	for (let i = openIdx + 1; i < s.length; i++) {
+		const c = s[i];
+		if (c === "'" || c === '"' || c === '`') {
+			const q = c;
+			i++;
+			while (i < s.length && !(s[i] === q && s[i - 1] !== '\\')) i++;
+			continue;
+		}
+		if (c === open) depth++;
+		else if (c === close && (open !== '<' || s[i - 1] !== '=')) { depth--; if (depth === 0) return [s.slice(openIdx + 1, i), i]; }
+	}
+	return [s.slice(openIdx + 1), s.length - 1];
+}
+function lastPrefixColon(first) {
+	let last = -1;
+	let depth = 0;
+	for (let i = 0; i < first.length - 1; i++) {
+		const c = first[i];
+		if (c === "'" || c === '"' || c === '`') {
+			const q = c;
+			i++;
+			while (i < first.length - 1 && !(first[i] === q && first[i - 1] !== '\\')) i++;
+			continue;
+		}
+		if (c === '(' || c === '[' || c === '<' || c === '{') depth++;
+		else if (c === ')' || c === ']' || c === '>' || c === '}') depth = Math.max(0, depth - 1);
+		if (depth > 0) continue;
+		if ((c === ':' || c === '=') && first[i + 1] === ' ') last = i + 2;
+		else if (c === 's' && first.slice(i - 6, i + 1) === 'extends') last = i + 2;
+	}
+	return last;
+}
+function canonUnionSort(s) {
+	let hadUnion = false;
+	let cur = '';
+	const parts = [];
+	const flush = () => { parts.push(cur); cur = ''; };
+	for (let i = 0; i < s.length; i++) {
+		const c = s[i];
+		if (c === "'" || c === '"' || c === '`') {
+			const q = c;
+			cur += c;
+			i++;
+			while (i < s.length) {
+				cur += s[i];
+				if (s[i] === q && s[i - 1] !== '\\') break;
+				i++;
+			}
+			continue;
+		}
+		if (c === '(' || c === '[' || c === '<' || c === '{') {
+			const [content, end] = consumeBalanced(s, i);
+			cur += c + (c === '{' ? canonBraceMembers(content) : canonUnionSort(content)) + (c === '(' ? ')' : c === '[' ? ']' : c === '<' ? '>' : '}');
+			i = end;
+			continue;
+		}
+		if (c === '|') { hadUnion = true; flush(); continue; }
+		cur += c;
+	}
+	flush();
+	if (!hadUnion) return parts[0];
+	const first = parts[0];
+	const cut = lastPrefixColon(first);
+	const prefix = cut >= 0 ? first.slice(0, cut) : '';
+	const rest = cut >= 0 ? first.slice(cut) : first;
+	const trail = /\s*$/.exec(parts[parts.length - 1])[0];
+	return prefix + [rest.trim(), ...parts.slice(1).map(p => p.trim())].sort().join(' | ') + trail;
+}
+function canonBraceMembers(content) {
+	let cur = '';
+	const members = [];
+	for (let i = 0; i < content.length; i++) {
+		const c = content[i];
+		if (c === "'" || c === '"' || c === '`') {
+			const q = c;
+			cur += c;
+			i++;
+			while (i < content.length) {
+				cur += content[i];
+				if (content[i] === q && content[i - 1] !== '\\') break;
+				i++;
+			}
+			continue;
+		}
+		if (c === '(' || c === '[' || c === '<' || c === '{') {
+			const [inner, end] = consumeBalanced(content, i);
+			cur += c + (c === '{' ? canonBraceMembers(inner) : canonUnionSort(inner)) + (c === '(' ? ')' : c === '[' ? ']' : c === '<' ? '>' : '}');
+			i = end;
+			continue;
+		}
+		if (c === ';') { members.push(cur); cur = ''; continue; }
+		cur += c;
+	}
+	members.push(cur);
+	return members.map(canonUnionSort).join(';');
+}
+const fullWalkCanonTypeStr = s => (typeof s === 'string'
+	? canonUnionSort(stripTruncatedMembers(LU2_RENAME(s.replace(/\/\*unresolved\*\/ /g, ''))))
+	: s);
+const fullWalkListCanon = v => (FULLWALK && Array.isArray(v) ? [...v].sort((x, y) => (stable(x) < stable(y) ? -1 : 1)) : v);
+
 // ── Side driver (child mode) ───────────────────────────────────────────────
 function runSide(side, dir) {
 	const ts = require2(side === 'stock' ? stockTsPath : tnbTsPath);
@@ -361,14 +740,18 @@ function runSide(side, dir) {
 		return { watch, program: (builder ?? watch.getProgram()).getProgram() };
 	};
 
-	const programs = { main: buildProgram('tsconfig.json'), cjs: buildProgram('tsconfig.cjs.json') };
+	const tBuildStart = Date.now();
+	const programs = FULLWALK
+		? { main: buildProgram('tsconfig.json'), cjs: buildProgram('tsconfig.cjs.json'), js: buildProgram('tsconfig.js.json') }
+		: { main: buildProgram('tsconfig.json'), cjs: buildProgram('tsconfig.cjs.json') };
+	const tBuildEnd = Date.now();
 	const entries = [];
 	const rec = (m, at, v) => entries.push({ m, at, v });
 
-	for (const proj of ['main', 'cjs']) {
+	for (const proj of FULLWALK ? ['main', 'cjs', 'js'] : ['main', 'cjs']) {
 		const { program } = programs[proj];
 		const checker = program.getTypeChecker();
-		const isCorpusFile = p => path.dirname(p) === dir || path.dirname(p) === path.join(dir, 'cjs');
+		const isCorpusFile = p => path.dirname(p) === dir || path.dirname(p) === path.join(dir, 'cjs') || path.dirname(p) === path.join(dir, 'js');
 
 		const tryQ = fn => { try { const v = fn(); return v === undefined ? null : v; } catch (e) { return { $err: String(e?.message ?? e).slice(0, 200) }; } };
 		// N3: well-known symbol names carry a global creation counter; module
@@ -397,14 +780,16 @@ function runSide(side, dir) {
 			};
 		};
 		// N1: only structural objectFlags bits 0..14 are comparable (see header).
+		// Full-walk: type strings ride the F2 multiset canon.
+		const canonTypeStr = s => (FULLWALK ? fullWalkCanonTypeStr(s) : s);
 		const canonType = t => {
 			if (t == null) return null;
 			if (t.$err) return t;
-			return { s: tryQ(() => checker.typeToString(t)), f: t.flags >>> 0, of: (t.objectFlags ?? 0) & 0x7fff };
+			return { s: tryQ(() => canonTypeStr(checker.typeToString(t))), f: t.flags >>> 0, of: (t.objectFlags ?? 0) & 0x7fff };
 		};
 		const canonProp = (s, locNode) => {
 			if (s == null || s.$err) return canonSym(s);
-			return { ...canonSym(s), t: tryQ(() => checker.typeToString(checker.getTypeOfSymbolAtLocation(s, locNode))) };
+			return { ...canonSym(s), t: tryQ(() => canonTypeStr(checker.typeToString(checker.getTypeOfSymbolAtLocation(s, locNode)))) };
 		};
 		const canonSig = sig => {
 			if (sig == null) return null;
@@ -412,13 +797,13 @@ function runSide(side, dir) {
 			const decl = sig.declaration ?? null;
 			const params = tryQ(() => sig.getParameters());
 			return {
-				str: tryQ(() => checker.signatureToString(sig)),
+				str: tryQ(() => canonTypeStr(checker.signatureToString(sig))),
 				decl: decl ? canonDecl(decl) : null,
 				params: params?.$err ? params : (params ?? []).map(p => ({
 					...canonSym(p),
-					t: tryQ(() => checker.typeToString(checker.getTypeOfSymbolAtLocation(p, decl ?? p.valueDeclaration ?? p.declarations?.[0]))),
+					t: tryQ(() => canonTypeStr(checker.typeToString(checker.getTypeOfSymbolAtLocation(p, decl ?? p.valueDeclaration ?? p.declarations?.[0])))),
 				})),
-				ret: tryQ(() => checker.typeToString(checker.getReturnTypeOfSignature(sig))),
+				ret: tryQ(() => canonTypeStr(checker.typeToString(checker.getReturnTypeOfSignature(sig)))),
 				tps: tryQ(() => (sig.typeParameters ?? []).map(canonType)),
 			};
 		};
@@ -450,11 +835,11 @@ function runSide(side, dir) {
 		};
 
 		const typeBattery = (t, at, node, props) => {
-			rec('typeToString', at, tryQ(() => checker.typeToString(t)));
-			rec('typeToString[NoTrunc]', at, tryQ(() => checker.typeToString(t, undefined, ts.TypeFormatFlags.NoTruncation)));
+			rec('typeToString', at, tryQ(() => canonTypeStr(checker.typeToString(t))));
+			rec('typeToString[NoTrunc]', at, tryQ(() => canonTypeStr(checker.typeToString(t, undefined, ts.TypeFormatFlags.NoTruncation))));
 			rec('getApparentType', at, canonType(tryQ(() => checker.getApparentType(t))));
-			rec('getPropertiesOfType', at, tryQ(() => checker.getPropertiesOfType(t).map(p => canonProp(p, node))));
-			rec('getApparentProperties', at, tryQ(() => t.getApparentProperties().map(p => canonProp(p, node))));
+			rec('getPropertiesOfType', at, tryQ(() => fullWalkListCanon(checker.getPropertiesOfType(t).map(p => canonProp(p, node)))));
+			rec('getApparentProperties', at, tryQ(() => fullWalkListCanon(t.getApparentProperties().map(p => canonProp(p, node)))));
 			rec('getCallSignatures', at, tryQ(() => t.getCallSignatures().map(canonSig)));
 			rec('getConstructSignatures', at, tryQ(() => t.getConstructSignatures().map(canonSig)));
 			rec('getBaseConstraintOfType', at, canonType(tryQ(() => checker.getBaseConstraintOfType(t))));
@@ -475,6 +860,135 @@ function runSide(side, dir) {
 			}
 			rec('getImmediateAliasedSymbol.chain', at, chain);
 		};
+		// F1: the NESTED lazy-accessor closure. Absent reads on the stock side
+		// are plain undefined (canon null); on the bridge a wire-present field
+		// fires the registry RPC — exactly the Go-side As*() cast path. The
+		// bridge documents empty array ≡ absent, so empty arrays canon to null.
+		const canonFieldValue = (v, primary, prop) => {
+			if (v == null) return null;
+			if (Array.isArray(v)) return v.length === 0 ? null : v.map(canonType);
+			const c = canonType(v);
+			// Stock and tsgo disagree on the enum fresh/regular self-pairing
+			// direction (triage-type-field-audit conditionalExemption): stock
+			// attaches it to enum unions, tsgo to enum literals — the value
+			// string-equals the enclosing type on both. The pairing is never
+			// consumed on those types, so normalize it to absent.
+			return c && primary && (prop === 'freshType' || prop === 'regularType') && c.s === primary.s ? null : c;
+		};
+		// StringLiteral whose parent makes it a module specifier: import/
+		// export declarations, import-equals (ExternalModuleReference), and
+		// require()/import() calls.
+		const isModuleSpecifier = node => {
+			if (node.kind !== ts.SyntaxKind.StringLiteral) return false;
+			const p = node.parent;
+			if (!p) return false;
+			switch (p.kind) {
+				case ts.SyntaxKind.ImportDeclaration:
+				case ts.SyntaxKind.ExternalModuleReference:
+					return true;
+				case ts.SyntaxKind.ExportDeclaration:
+					return p.moduleSpecifier === node;
+				case ts.SyntaxKind.CallExpression:
+					return p.arguments[0] === node && (
+						(p.expression.kind === ts.SyntaxKind.Identifier && p.expression.text === 'require')
+						|| p.expression.kind === ts.SyntaxKind.ImportKeyword);
+				default:
+					return false;
+			}
+		};
+		// Every corpus node (never lib files) runs the POINTS batteries with
+		// the curated props list dropped, plus the field closure on each of
+		// the three primary types. SourceFile nodes get the module battery
+		// only and module-specifier StringLiterals the resolve battery only —
+		// the same shape the curated module/spec points use.
+		//
+		// Every rec fires unconditionally, with null when the primary is
+		// absent. The structure must be a function of the node only: the
+		// walk's own first run found null-ness divergences (stock's
+		// getSymbolAtLocation has no ExportAssignment case, so it returns
+		// undefined where tsgo returns the export= symbol), and a battery
+		// that runs conditionally on a divergent primary desynchronizes the
+		// lockstep comparison. Unconditional recs turn "stock null vs bridge
+		// value" into an ordinary DIFF instead of a harness-bug FAIL.
+		const fullWalkNodeRec = (node, at) => {
+			if (node.kind === ts.SyntaxKind.SourceFile) {
+				const modSym = tryQ(() => checker.getSymbolAtLocation(node));
+				rec('getSymbolAtLocation[module]', at, canonSym(modSym));
+				rec('getExportsOfModule', at, modSym && !modSym.$err ? tryQ(() => fullWalkListCanon(checker.getExportsOfModule(modSym).map(p => canonProp(p, node)))) : null);
+				rec('getTypeOfSymbolAtLocation[module]', at, modSym && !modSym.$err ? canonType(tryQ(() => checker.getTypeOfSymbolAtLocation(modSym, node))) : null);
+				return;
+			}
+			if (isModuleSpecifier(node)) {
+				const resolved = tryQ(() => checker.resolveExternalModuleName(node));
+				rec('resolveExternalModuleName', at, canonSym(resolved));
+				rec('getSymbolAtLocation[specifier]', at, canonSym(tryQ(() => checker.getSymbolAtLocation(node))));
+				rec('getExportsOfModule', at, resolved && !resolved.$err ? tryQ(() => fullWalkListCanon(checker.getExportsOfModule(resolved).map(p => canonProp(p, node)))) : null);
+				return;
+			}
+			if (TYPE_SKIP_KINDS.has(ts.SyntaxKind[node.kind])) return; // stock-contract gap, see above
+			const t = tryQ(() => checker.getTypeAtLocation(node));
+			const tb = t && !t.$err ? t : null;
+			const tCanon = canonType(tb);
+			rec('getTypeAtLocation', at, tCanon);
+			rec('typeToString', at, tb ? tryQ(() => canonTypeStr(checker.typeToString(tb))) : null);
+			rec('typeToString[NoTrunc]', at, tb ? tryQ(() => canonTypeStr(checker.typeToString(tb, undefined, ts.TypeFormatFlags.NoTruncation))) : null);
+			rec('getApparentType', at, tb ? canonType(tryQ(() => checker.getApparentType(tb))) : null);
+			rec('getPropertiesOfType', at, tb ? tryQ(() => fullWalkListCanon(checker.getPropertiesOfType(tb).map(p => canonProp(p, node)))) : null);
+			rec('getApparentProperties', at, tb ? tryQ(() => fullWalkListCanon(tb.getApparentProperties().map(p => canonProp(p, node)))) : null);
+			rec('getCallSignatures', at, tb ? tryQ(() => tb.getCallSignatures().map(canonSig)) : null);
+			rec('getConstructSignatures', at, tb ? tryQ(() => tb.getConstructSignatures().map(canonSig)) : null);
+			rec('getBaseConstraintOfType', at, tb ? canonType(tryQ(() => checker.getBaseConstraintOfType(tb))) : null);
+			rec('Type.getConstraint', at, tb ? canonType(tryQ(() => tb.getConstraint?.())) : null);
+			// The three closures share the node label; suffix the field recs
+			// with their source ([t]/[t1]/[t2]) so a closure that converges
+			// (e.g. the declared-type closure on the Abs error node) doesn't
+			// stale-fail an exemption keyed on a diverging sibling closure.
+			for (const [prop] of FULLWALK_NESTED) rec(`field:${prop}`, `${at}[t]`, tb ? canonFieldValue(tryQ(() => tb[prop]), tCanon, prop) : null);
+			if (!SYMBOL_CONTRACT_KINDS.has(ts.SyntaxKind[node.kind])) return;
+			const sym = tryQ(() => checker.getSymbolAtLocation(node));
+			const sb = sym && !sym.$err ? sym : null;
+			rec('getSymbolAtLocation', at, canonSym(sb));
+			const t1 = sb ? tryQ(() => checker.getTypeOfSymbolAtLocation(sb, node)) : null;
+			const t1Canon = canonType(t1);
+			rec('getTypeOfSymbolAtLocation', at, t1Canon);
+			for (const [prop] of FULLWALK_NESTED) rec(`field:${prop}`, `${at}[t1]`, t1 && !t1.$err ? canonFieldValue(tryQ(() => t1[prop]), t1Canon, prop) : null);
+			const t2 = sb ? tryQ(() => checker.getDeclaredTypeOfSymbol(sb)) : null;
+			const t2Canon = canonType(t2);
+			rec('getDeclaredTypeOfSymbol', at, t2Canon);
+			for (const [prop] of FULLWALK_NESTED) rec(`field:${prop}`, `${at}[t2]`, t2 && !t2.$err ? canonFieldValue(tryQ(() => t2[prop]), t2Canon, prop) : null);
+			const alias = sb && (sb.flags & ts.SymbolFlags.Alias) ? sb : null;
+			rec('getAliasedSymbol', at, alias ? canonSym(tryQ(() => checker.getAliasedSymbol(alias))) : null);
+			const chain = [];
+			let cur = alias;
+			while (cur) {
+				const imm = tryQ(() => checker.getImmediateAliasedSymbol(cur));
+				if (imm == null || imm.$err) { if (imm?.$err) chain.push(imm); break; }
+				chain.push(canonSym(imm));
+				if (!(imm.flags & ts.SymbolFlags.Alias) || chain.length >= 8) break;
+				cur = imm;
+			}
+			rec('getImmediateAliasedSymbol.chain', at, alias ? chain : null);
+		};
+
+		if (FULLWALK) {
+			for (const rel of FULLWALK_FILES) {
+				if (projOfFile(rel) !== proj) continue;
+				if (FULLWALK_FILE !== undefined && FULLWALK_FILE !== rel) continue;
+				const sf = program.getSourceFile(path.join(dir, rel));
+				if (FULLWALK_NO_PROGRAM.has(rel)) {
+					if (sf) throw new Error(`${rel} unexpectedly in the ${proj} program (${side}) — update FULLWALK_NO_PROGRAM`);
+					continue;
+				}
+				if (!sf) throw new Error(`no SourceFile for ${rel} (${side})`);
+				const visit = node => {
+					const at = `${rel}:${node.pos}:${ts.SyntaxKind[node.kind]}`;
+					fullWalkNodeRec(node, at);
+					ts.forEachChild(node, visit);
+				};
+				visit(sf);
+			}
+			continue;
+		}
 
 		for (const point of POINTS) {
 			if (point.proj !== proj) continue;
@@ -513,7 +1027,8 @@ function runSide(side, dir) {
 	}
 
 	for (const p of Object.values(programs)) p.watch.close?.();
-	return { side, entries };
+	if (!FULLWALK) return { side, entries };
+	return { side, file: FULLWALK_FILE ?? 'all', entries, timing: { buildMs: tBuildEnd - tBuildStart, walkMs: Date.now() - tBuildEnd } };
 }
 
 // ── Compare (parent mode) ──────────────────────────────────────────────────
@@ -530,12 +1045,13 @@ function writeCorpus(dir) {
 	}
 	fs.writeFileSync(path.join(dir, 'tsconfig.json'), JSON.stringify(MAIN_TSCONFIG, null, 2));
 	fs.writeFileSync(path.join(dir, 'tsconfig.cjs.json'), JSON.stringify(CJS_TSCONFIG, null, 2));
+	fs.writeFileSync(path.join(dir, 'tsconfig.js.json'), JSON.stringify(JS_TSCONFIG, null, 2));
 }
 
-function runChild(side, dir) {
+function runChild(side, dir, extraEnv, maxBuffer) {
 	const res = spawnSync(process.execPath, [fileURLToPath(import.meta.url), dir], {
-		env: { ...process.env, TNB_DIFF_SIDE: side },
-		encoding: 'utf8', timeout: 300_000, maxBuffer: 64 * 1024 * 1024,
+		env: { ...process.env, TNB_DIFF_SIDE: side, ...extraEnv },
+		encoding: 'utf8', timeout: 300_000, maxBuffer: maxBuffer ?? 64 * 1024 * 1024,
 	});
 	if (res.status !== 0) {
 		console.error(`child ${side} FAILED (status ${res.status})\n${res.stderr?.slice(-2000) ?? ''}\n${res.stdout?.slice(-2000) ?? ''}`);
@@ -645,10 +1161,10 @@ function compareEntries(aList, bList) {
 			continue;
 		}
 		const sa = stable(a.v), sb = stable(b.v);
-		const why = KNOWN_DIVERGENCES.get(key);
+		const why = (FULLWALK ? FULLWALK_KNOWN : KNOWN_DIVERGENCES).get(key);
 		if (sa === sb) {
 			if (why !== undefined) {
-				console.log(`FAIL ${key}: STALE EXEMPTION — sides converged, remove the KNOWN_DIVERGENCES entry (${why})`);
+				console.log(`FAIL ${key}: STALE EXEMPTION — sides converged, remove the ${FULLWALK ? 'FULLWALK_KNOWN' : 'KNOWN_DIVERGENCES'} entry (${why})`);
 				fail++;
 			} else ok++;
 			continue;
@@ -690,6 +1206,337 @@ function parentMain() {
 	const { ok, known, fail } = compareEntries(stock.entries, tnb.entries);
 	console.log(`\nVERDICT: ${fail === 0 ? 'PASS' : 'FAIL'} (${ok} ok, ${known} known, ${fail} diffs)`);
 	process.exit(fail === 0 ? 0 : 1);
+}
+
+// ── RPC-method coverage gate (--full-walk) ─────────────────────────────────
+// A new RPC method must not ship unwalked: every method the JS side can call
+// needs a COVERAGE entry naming the battery that exercises it (or an exempt
+// reason). The two parse sources are the Go method set (proto.go constants)
+// and the JS-callable surface in tsgoChecker.ts (ARENA_METHODS keys + the
+// JSON-path literals). Relations, session lifecycle and IDE paths are exempt
+// by the documented tradeoffs (AGENTS.md) — the gate's job is the decision
+// being explicit, not the walk covering the whole surface.
+const COVERAGE = new Map([
+	// battery = the typeBattery run on every node's getTypeAtLocation result
+	['getTypeAtLocation', 'battery'],
+	['getApparentType', 'battery'],
+	['getPropertiesOfType', 'battery'],
+	['getAugmentedPropertiesOfType', 'battery'], // Type.getApparentProperties
+	['getSignaturesOfType', 'battery'], // Type.getCallSignatures/getConstructSignatures
+	['getBaseConstraintOfType', 'battery'], // + Type.getConstraint
+	['typeToString', 'battery'],
+	['getReturnTypeOfSignature', 'battery'], // canonSig
+	['getParametersOfSignature', 'battery'], // canonSig
+	['getTypeParametersOfSignature', 'battery'], // canonSig
+	['getSymbolsDeclarations', 'battery'], // canonSym declarations
+	// symbol-battery = getSymbolAtLocation + its symbol chain per node
+	['getSymbolAtLocation', 'symbol-battery'],
+	['getTypeOfSymbolAtLocation', 'symbol-battery'],
+	['getDeclaredTypeOfSymbol', 'symbol-battery'],
+	['getAliasedSymbol', 'symbol-battery'],
+	['getImmediateAliasedSymbol', 'symbol-battery'],
+	// spec-battery = resolveExternalModuleName on module-specifier literals
+	['resolveExternalModuleName', 'spec-battery'],
+	// module-battery = getSymbolAtLocation(SourceFile) + exports per file
+	['getExportsOfModule', 'module-battery'],
+	// field:<prop> = the 14-field NESTED lazy-accessor closure (F1)
+	['getTargetOfType', 'field:target'],
+	['getThisTypeOfType', 'field:thisType'],
+	['getFreshTypeOfType', 'field:freshType'],
+	['getRegularTypeOfType', 'field:regularType'],
+	['getObjectTypeOfType', 'field:objectType'],
+	['getIndexedAccessIndexType', 'field:indexType'],
+	['getCheckTypeOfType', 'field:checkType'],
+	['getExtendsTypeOfType', 'field:extendsType'],
+	['getBaseTypeOfType', 'field:baseType'],
+	['getConstraintOfType', 'field:substConstraint'],
+	['getTypeParametersOfType', 'field:typeParameters'],
+	['getOuterTypeParametersOfType', 'field:outerTypeParameters'],
+	['getLocalTypeParametersOfType', 'field:localTypeParameters'],
+	['getAliasTypeArgumentsOfType', 'field:aliasTypeArguments'],
+	// exempt — not reachable from the walk; the reason names where parity
+	// rests instead (services paths ride sim-nav/volar; IDE paths ride the
+	// IDE-sim and arena-parity witnesses; relations are an accepted tradeoff).
+	['getResolvedSignature', 'exempt: signature-from-node lookup — IDE sims/volar path'],
+	['getContextualType', 'exempt: contextual typing — sim-nav/volar path'],
+	['getContextualTypeForArgumentAtIndex', 'exempt: contextual typing — sim-nav/volar path'],
+	['getBaseTypeOfLiteralType', 'exempt: services helper — sim-nav/volar path'],
+	['getNonNullableType', 'exempt: services helper — sim-nav/volar path'],
+	['getTypeArguments', 'exempt: services helper — sim-nav/volar path'],
+	['getBaseTypes', 'exempt: services helper — sim-nav/volar path'],
+	['getSymbolOfType', 'exempt: Type.symbol backfill — sim-nav/volar path'],
+	['getTypesOfType', 'exempt: services helper — sim-nav/volar path'],
+	['isArrayType', 'exempt: services helper — sim-nav/volar path'],
+	['getTypeOfSymbol', 'exempt: host-fast services path'],
+	['getSymbolAtPosition', 'exempt: position API — IDE sims'],
+	['quickinfo', 'exempt: IDE hover path — arena-parity + IDE sims'],
+	['references', 'exempt: IDE path'],
+	['definitionAndBoundSpan', 'exempt: IDE path'],
+	['getRootSymbols', 'exempt: services helper'],
+	['getExportsAndPropertiesOfModule', 'exempt: services helper (tsserver export maps)'],
+	['getExportsOfSymbol', 'exempt: services helper'],
+	['getMembersOfSymbol', 'exempt: services helper'],
+	['getParentOfSymbol', 'exempt: Symbol.parent — services path'],
+	['getExportSymbolOfSymbol', 'exempt: services helper (tsserver)'],
+	['getGlobalExportsOfSymbol', 'exempt: triage-symbol-global-exports'],
+	['getDocumentationComment', 'exempt: quickinfo/docs path'],
+	['resolveExternalModuleSymbol', 'exempt: host-side module resolution internals'],
+	['symbolIsValue', 'exempt: services helper'],
+	['getLocalTypeParametersOfClassOrInterfaceOrTypeAlias', 'exempt: services helper'],
+	['getJsDocTags', 'exempt: docs path'],
+	['collectVisitedTypeParameters', 'exempt: services helper'],
+	['createArrayType', 'exempt: type factory'],
+	['createPromiseType', 'exempt: type factory'],
+	['getAwaitedType', 'exempt: services helper'],
+	['getConstraintOfTypeParameter', 'exempt: Type.getConstraint routes to getBaseConstraintOfType in the adapter'],
+	['getDefaultFromTypeParameter', 'exempt: Type.getDefault — services path'],
+	['getElementTypeOfArrayType', 'exempt: services helper'],
+	['getExactOptionalProperties', 'exempt: services helper'],
+	['getPromisedTypeOfPromise', 'exempt: services helper'],
+	['getWidenedLiteralType', 'exempt: services helper'],
+	['isEmptyAnonymousObjectType', 'exempt: services helper'],
+	['isLibType', 'exempt: services helper'],
+	['isNullableType', 'exempt: services helper'],
+	['isTupleType', 'exempt: services helper'],
+	['typeHasCallOrConstructSignatures', 'exempt: services helper'],
+	['getFalseTypeOfConditionalType', 'exempt: services helper'],
+	['getTrueTypeOfConditionalType', 'exempt: services helper'],
+	['getAliasSymbolOfType', 'exempt: services helper'],
+	['getAnyType', 'exempt: intrinsic singleton (factory)'],
+	['getBigIntType', 'exempt: intrinsic singleton (factory)'],
+	['getBooleanType', 'exempt: intrinsic singleton (factory)'],
+	['getESSymbolType', 'exempt: intrinsic singleton (factory)'],
+	['getErrorType', 'exempt: intrinsic singleton (factory)'],
+	['getNeverType', 'exempt: intrinsic singleton (factory)'],
+	['getNonPrimitiveType', 'exempt: intrinsic singleton (factory)'],
+	['getNullType', 'exempt: intrinsic singleton (factory)'],
+	['getNumberType', 'exempt: intrinsic singleton (factory)'],
+	['getOptionalType', 'exempt: intrinsic singleton (factory)'],
+	['getPromiseLikeType', 'exempt: intrinsic singleton (factory)'],
+	['getPromiseType', 'exempt: intrinsic singleton (factory)'],
+	['getStringType', 'exempt: intrinsic singleton (factory)'],
+	['getUndefinedType', 'exempt: intrinsic singleton (factory)'],
+	['getUnknownType', 'exempt: intrinsic singleton (factory)'],
+	['getVoidType', 'exempt: intrinsic singleton (factory)'],
+	['getAnyAsyncIterableType', 'exempt: intrinsic singleton (factory)'],
+	['containsArgumentsReference', 'exempt: emit helper'],
+	['getContextualTypeForJsxAttribute', 'exempt: JSX path — framework-checks'],
+	['getTypeArgumentConstraint', 'exempt: services helper'],
+	['getTypeOfAssignmentPattern', 'exempt: services helper'],
+	['isDeclarationVisible', 'exempt: services helper'],
+	['isImplementationOfOverload', 'exempt: services helper'],
+	['isOptionalParameter', 'exempt: services helper'],
+	['requiresAddingImplicitUndefined', 'exempt: services helper'],
+	['getJsxFragmentFactory', 'exempt: JSX path'],
+	['getJsxIntrinsicTagNamesAt', 'exempt: JSX path'],
+	['getPropertySymbolOfDestructuringAssignment', 'exempt: services helper'],
+	['getSignatureFromDeclaration', 'exempt: services helper'],
+	['getExportSpecifierLocalTargetSymbol', 'exempt: services helper'],
+	['getRestTypeOfSignature', 'exempt: services helper'],
+	['getTypeArgumentsForResolvedSignature', 'exempt: services helper'],
+	['getTargetOfSignature', 'exempt: Signature.target — services path'],
+	['getThisParameterOfSignature', 'exempt: services helper'],
+	['hasEffectiveRestParameter', 'exempt: services helper'],
+	['getExpandedParameters', 'exempt: completions path'],
+	['getPropertyOfType', 'exempt: curated-POINTS props only — the full-walk drops the curated props list; property-lookup parity rests on sim-nav/volar'],
+	['getTypeOfPropertyOfType', 'exempt: services helper'],
+	['getTypeOfPropertyOfContextualType', 'exempt: services helper'],
+	['getStringLiteralType', 'exempt: type factory'],
+	['getBigIntLiteralType', 'exempt: type factory'],
+	['getNumberLiteralType', 'exempt: type factory'],
+	['getTypeAtPosition', 'exempt: position API'],
+	['getModuleSymbolForSourceFile', 'exempt: position/file API — the walk uses getSymbolAtLocation(SourceFile)'],
+	['getAccessibleSymbolChain', 'exempt: completions path'],
+	['getCandidateSignaturesForStringLiteralCompletions', 'exempt: completions path'],
+	['tryGetThisTypeAt', 'exempt: services helper'],
+	['getParentsOfSymbols', 'exempt: services helper'],
+	['getAmbientModules', 'exempt: services helper'],
+	['getCompletionsAtPosition', 'exempt: IDE completions path'],
+	['signatureHelp', 'exempt: IDE path'],
+	['getRenameInfo', 'exempt: IDE path'],
+	['getEditsForRename', 'exempt: IDE path'],
+	['initialize', 'exempt: session lifecycle'],
+	['updateSnapshot', 'exempt: session lifecycle'],
+	['resolveCompletionItem', 'exempt: IDE completions path'],
+]);
+
+function coverageGate() {
+	const goPath = path.join(repoRoot, 'typescript-go', 'internal', 'api', 'proto.go');
+	const goMethods = new Set();
+	const notes = [];
+	if (fs.existsSync(goPath)) {
+		const goSrc = fs.readFileSync(goPath, 'utf8');
+		for (const m of goSrc.matchAll(/Method[A-Za-z0-9]+[ \t]+Method = "([A-Za-z0-9]+)"/g)) goMethods.add(m[1]);
+	} else {
+		// The isolated tools copy (ci.yml witness job) symlinks lib/native/
+		// vendor/patches/bin but not the typescript-go submodule — the Go
+		// surface cross-check cannot run there. Said, not silent: every hard
+		// FAIL below parses tsgoChecker.ts, which is present in both layouts.
+		notes.push('go-surface cross-check skipped: typescript-go/internal/api/proto.go not present (isolated tools copy)');
+	}
+
+	const tsSrc = fs.readFileSync(path.join(repoRoot, 'patches', 'typescript', 'overlay', 'src', 'compiler', 'tsgoChecker.ts'), 'utf8');
+	const arenaStart = tsSrc.indexOf('const ARENA_METHODS');
+	const arenaBlock = tsSrc.slice(arenaStart, tsSrc.indexOf(']);', arenaStart));
+	const arenaMethods = new Set();
+	for (const m of arenaBlock.matchAll(/\[\s*"([A-Za-z0-9]+)"\s*,\s*\[/g)) arenaMethods.add(m[1]);
+	// JSON-path literals in the same file (the non-arena surface it calls by
+	// name): apiRequest("…") and tsgoLsApiRequest(…, "…") call sites.
+	const jsonMethods = new Set();
+	for (const m of tsSrc.matchAll(/apiRequest\(\s*"([A-Za-z0-9]+)"/g)) jsonMethods.add(m[1]);
+	for (const m of tsSrc.matchAll(/tsgoLsApiRequest\([^,]+,\s*"([A-Za-z0-9]+)"/g)) jsonMethods.add(m[1]);
+
+	const nested = parseNestedTables();
+	const nestedProps = new Set(nested.map(([prop]) => prop));
+	const nestedFetch = new Map(nested.map(([prop, method]) => [method, prop]));
+
+	const errors = [];
+	const surface = new Set([...arenaMethods, ...jsonMethods]);
+	if (goMethods.size > 0) {
+		for (const m of surface) {
+			if (!goMethods.has(m)) errors.push(`${m}: JS-callable but missing from the Go method set (proto.go) — the bridge could not dispatch it`);
+		}
+	}
+	for (const m of surface) {
+		if (!COVERAGE.has(m)) errors.push(`${m}: JS-callable method with no COVERAGE entry — walk it or exempt it`);
+	}
+	for (const m of COVERAGE.keys()) {
+		if (!surface.has(m)) errors.push(`${m}: stale COVERAGE entry — method no longer JS-callable`);
+	}
+	for (const [method, prop] of nestedFetch) {
+		if (!surface.has(method)) errors.push(`field:${prop}: NESTED fetch method ${method} is not JS-callable`);
+		if (COVERAGE.get(method) !== `field:${prop}`) errors.push(`field:${prop}: COVERAGE must map ${method} → field:${prop} (NESTED tables are the single source of truth)`);
+	}
+	for (const p of nestedProps) {
+		if (![...COVERAGE.values()].includes(`field:${p}`)) errors.push(`field:${p}: NESTED prop has no field: coverage entry — the closure must read every NESTED prop`);
+	}
+	for (const [m, v] of COVERAGE) {
+		if (!/^(battery|symbol-battery|spec-battery|module-battery|field:[A-Za-z0-9]+|exempt: .+)$/.test(v)) errors.push(`${m}: bad COVERAGE value ${JSON.stringify(v)}`);
+	}
+	let exempt = 0;
+	for (const v of COVERAGE.values()) if (v.startsWith('exempt:')) exempt++;
+	const summary = `coverage: ${surface.size} JS-callable methods (${arenaMethods.size} arena + ${jsonMethods.size} json-path; ${goMethods.size} in the Go surface), ${COVERAGE.size} coverage entries (${exempt} exempt)${notes.length ? ` — ${notes[0]}` : ''}`;
+	return { errors, summary };
+}
+
+// ── Full-walk parent ────────────────────────────────────────────────────────
+// One stock child walks every corpus file; the tnb side runs one child per
+// corpus file so a Go panic (process-fatal in the bridge) only kills its own
+// file's walk — the parent collects every crash in one run. Children run in
+// a small parallel pool (independent processes, read-only fixture); the
+// parent re-concatenates entries in the fixed FULLWALK_FILES order.
+function spawnChild(side, dir, extraEnv) {
+	return new Promise(resolve => {
+		const child = spawn(process.execPath, [fileURLToPath(import.meta.url), dir], {
+			env: { ...process.env, TNB_DIFF_SIDE: side, ...extraEnv },
+		});
+		let out = '', err = '';
+		child.stdout.setEncoding('utf8');
+		child.stdout.on('data', d => { out += d; });
+		child.stderr.setEncoding('utf8');
+		child.stderr.on('data', d => { err += d; });
+		const killTimer = setTimeout(() => child.kill('SIGKILL'), 300_000);
+		child.on('close', status => {
+			clearTimeout(killTimer);
+			resolve({ status, out, err });
+		});
+	});
+}
+
+const FULLWALK_JOBS = 4; // parallel tnb children — panics are isolated either way
+
+const finalVerdict = ({ crashes, fail }) => (crashes > 0 || fail > 0 ? 'FAIL' : 'PASS');
+
+async function parentMainFullWalk() {
+	const { errors, summary } = coverageGate();
+	if (errors.length) {
+		for (const e of errors) console.error(`COVERAGE-FAIL ${e}`);
+		process.exit(1);
+	}
+	console.log(summary);
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tnb-checker-fullwalk-'));
+	writeCorpus(dir);
+	const t0 = Date.now();
+	const stock = runChild('stock', dir, { TNB_DIFF_FULLWALK: '1' }, 512 * 1024 * 1024);
+	const t1 = Date.now();
+	const tnb = await runTnbPool(dir);
+	const t2 = Date.now();
+	console.log(`fixture: ${dir}`);
+	const crashes = tnb.filter(r => r.crash);
+	for (const c of crashes) console.error(`CRASH ${c.file}\n${c.stderr.slice(-2000)}`);
+	const okFiles = tnb.filter(r => !r.crash);
+	// per-file misalignment = harness bug: a child must emit only its own file's labels
+	for (const r of okFiles) {
+		if (r.result.file !== r.file) {
+			console.error(`FAIL per-file misalignment (harness bug): child asked for ${r.file} reported ${r.result.file}`);
+			process.exit(1);
+		}
+		const bad = r.result.entries.find(e => !e.at.startsWith(`${r.file}:`));
+		if (bad) {
+			console.error(`FAIL per-file misalignment (harness bug): child for ${r.file} emitted ${bad.m}@${bad.at}`);
+			process.exit(1);
+		}
+	}
+	// The stock stream is file-contiguous in FULLWALK_FILES order: slice it
+	// into per-file segments so a crashed tnb file only punches a hole in its
+	// own segment — every crash is reported above, the surviving files still
+	// compare, and the final verdict is FAIL.
+	const stockSegments = new Map();
+	let idx = 0;
+	for (const rel of FULLWALK_FILES) {
+		const seg = [];
+		while (idx < stock.entries.length && stock.entries[idx].at.startsWith(`${rel}:`)) seg.push(stock.entries[idx++]);
+		stockSegments.set(rel, seg);
+	}
+	if (idx !== stock.entries.length) {
+		console.error(`FAIL stock entry misalignment (harness bug): ${stock.entries[idx].m}@${stock.entries[idx].at} belongs to no walk file`);
+		process.exit(1);
+	}
+	let ok = 0, known = 0, fail = 0, compared = 0;
+	for (const rel of FULLWALK_FILES) {
+		const r = okFiles.find(x => x.file === rel);
+		const seg = stockSegments.get(rel);
+		if (r && seg.length !== r.result.entries.length) {
+			console.error(`FAIL entry count mismatch for ${rel} (harness bug): stock=${seg.length} tnb=${r.result.entries.length}`);
+			process.exit(1);
+		}
+		if (r) {
+			const c = compareEntries(seg, r.result.entries);
+			ok += c.ok; known += c.known; fail += c.fail;
+			compared++;
+		}
+	}
+	const tnbTotal = okFiles.reduce((a, r) => a + r.result.entries.length, 0);
+	console.log(`entries: stock=${stock.entries.length} tnb=${tnbTotal} (${compared}/${FULLWALK_FILES.length} files compared${crashes.length ? `, ${crashes.length} crashed` : ''})`);
+	const st = stock.timing;
+	const tt = okFiles.reduce((a, r) => ({ build: a.build + r.result.timing.buildMs, walk: a.walk + r.result.timing.walkMs }), { build: 0, walk: 0 });
+	console.log(`timing: stock build ${(st.buildMs / 1000).toFixed(1)}s + walk ${(st.walkMs / 1000).toFixed(1)}s; tnb ${okFiles.length} children: build ${(tt.build / 1000).toFixed(1)}s + walk ${(tt.walk / 1000).toFixed(1)}s (sum) over ${((t2 - t1) / 1000).toFixed(1)}s wall; total ${((t2 - t0) / 1000).toFixed(1)}s`);
+	const verdict = finalVerdict({ crashes: crashes.length, fail });
+	console.log(`\nVERDICT: ${verdict} (${ok} ok, ${known} known, ${fail} diffs${crashes.length ? `, ${crashes.length} crashes` : ''})`);
+	process.exit(verdict === 'PASS' ? 0 : 1);
+}
+
+async function runTnbPool(dir) {
+	const results = new Array(FULLWALK_FILES.length);
+	let next = 0;
+	const worker = async () => {
+		while (next < FULLWALK_FILES.length) {
+			const i = next++;
+			const rel = FULLWALK_FILES[i];
+			const res = await spawnChild('tnb', dir, { TNB_DIFF_FULLWALK: '1', TNB_DIFF_FILE: rel });
+			if (res.status !== 0) {
+				results[i] = { file: rel, crash: true, status: res.status, stderr: res.err };
+				continue;
+			}
+			try {
+				results[i] = { file: rel, crash: false, result: JSON.parse(res.out.trim().split('\n').at(-1)) };
+			} catch (e) {
+				results[i] = { file: rel, crash: true, status: res.status, stderr: `unparseable output: ${e.message}\n${res.out.slice(-2000)}` };
+			}
+		}
+	};
+	await Promise.all(Array.from({ length: Math.min(FULLWALK_JOBS, FULLWALK_FILES.length) }, worker));
+	return results;
 }
 
 // ── Self-test (--self-test) ─────────────────────────────────────────────────
@@ -755,6 +1602,22 @@ function selfTest() {
 	r = run(U2T_KEY, [{ name: '0', flags: 4, decls: [], t: 'P' }, every], [{ ...everyTnb, name: 'evry' }, { name: '0', flags: 4, decls: [], t: 'P' }]);
 	check('U2T wrong member name at known key is KNOWN-SHAPE-VIOLATION', r.fail === 1 && r.known === 0);
 
+	// Full-walk canon (F2): union-sort / member-list sort / LU2 rename bake the
+	// ordering exemptions into canon; the crashed-child path must fail the verdict.
+	check('full-walk union canon sorts top-level constituents', fullWalkCanonTypeStr('"b" | "a" | "c"') === '"a" | "b" | "c"');
+	check('full-walk union canon sorts nested unions inside braces', fullWalkCanonTypeStr('{ a: "b" | "a" }') === '{ a: "a" | "b" }');
+	check('full-walk union canon keeps the annotation prefix', fullWalkCanonTypeStr('{ raw: readonly string[] | ArrayLike<string>; }') === '{ raw: ArrayLike<string> | readonly string[]; }');
+	check('full-walk union canon keeps the extends prefix', fullWalkCanonTypeStr('S extends "b" | "a"') === 'S extends "a" | "b"');
+	check('full-walk union canon leaves member order compared', fullWalkCanonTypeStr('{ a: 1; b: 2; }') === '{ a: 1; b: 2; }');
+	check('full-walk canon strips order-dependent truncation tails', fullWalkCanonTypeStr('{ m: T; ... 3 more ...; z: U; }') === '{ … }');
+	check('full-walk canon applies the LU2 rename', fullWalkCanonTypeStr('(maxLength: number, fillString?: string | undefined) => string') === '(targetLength: number, padString?: string | undefined) => string');
+	const memberSort = list => [...list].sort((x, y) => (stable(x) < stable(y) ? -1 : 1));
+	check('full-walk member-list sort equalizes reordered arrays',
+		stable(memberSort([{ name: 'b', flags: 1, decls: [], t: 'x' }, { name: 'a', flags: 1, decls: [], t: 'y' }]))
+		=== stable([{ name: 'a', flags: 1, decls: [], t: 'y' }, { name: 'b', flags: 1, decls: [], t: 'x' }]));
+	check('synthetic crashed tnb child forces VERDICT FAIL',
+		finalVerdict({ crashes: 1, fail: 0 }) === 'FAIL' && finalVerdict({ crashes: 0, fail: 0 }) === 'PASS');
+
 	console.log(failed === 0 ? '\nSELF-TEST: PASS' : `\nSELF-TEST: FAIL (${failed} assertions)`);
 	process.exit(failed === 0 ? 0 : 1);
 }
@@ -765,6 +1628,8 @@ if (process.argv.includes('--self-test')) {
 	const out = runSide(process.env.TNB_DIFF_SIDE, process.argv[2]);
 	fs.writeSync(1, JSON.stringify(out) + '\n');
 	process.exit(0);
+} else if (FULLWALK) {
+	await parentMainFullWalk();
 } else {
 	parentMain();
 }

@@ -32,13 +32,14 @@ TNB is a tsgo-backed TypeScript fork: upstream `microsoft/TypeScript` and `micro
 
 - `npm run check:lib` / `check:enums` / `check:sourcefile-guard`
 - `npm run check:go-as-guards` — Go-side Type-cast guard: every `Type.As*()` chain deref and unguarded nil-family assignment in the tsgo patches/overlay is fixed or carries an inline `// asguard:exempt` reason (issues #69/#70 bug class)
-- Witnesses: 82 across wg0–wg6, all wired in CI (`.github/workflows/ci.yml`), single source of truth `tools/ci-witness-groups.mjs` — `node tools/ci-witness-groups.mjs all` validates dup/missing/orphan/local-only/baseline wiring and emits the matrix (`matrix` mode feeds the ci.yml prepare job).
+- Witnesses: 83 across wg0–wg6, all wired in CI (`.github/workflows/ci.yml`), single source of truth `tools/ci-witness-groups.mjs` — `node tools/ci-witness-groups.mjs all` validates dup/missing/orphan/local-only/baseline wiring and emits the matrix (`matrix` mode feeds the ci.yml prepare job).
 - Local-only — run on demand, not in the matrix (reasons in the matrix header comment): framework-checks, external-edits, generation-retention, napi-fuzz, completion-latency, postedit-latency, perf-edit-rpc, perf-qi-rpc, typing-cpuprof.
 - Semantic witnesses (the rest of the matrix is bare stock-parity checks):
   - `triage-crossgen-reuse` — issue #11: cross-generation RemoteSourceFile reuse + edit invalidation; a pre-edit type handle must die, not re-resolve
   - `triage-prototype-refresh` — issue #57: a replacement snapshot keeps Type prototype APIs routed to its live checker
   - `triage-nuxtui-exportstar` — issue #26: `./X.vue` with an on-disk `X.d.vue.ts` resolves to the declaration (@nuxt/ui dist pattern)
   - `triage-checker-differential` — checker-API stock differential: byte-equal canon per method@location, stale exemptions fail
+  - `triage-checker-fullwalk` — the same harness parameterized `--full-walk`: every corpus node × the curated batteries + a 14-field NESTED lazy-accessor closure per primary type (the reads that flush Go-side As*() nil casts, the #69/#70/#71 class), order-insensitive canon, one tnb child per corpus file so a panic in one file doesn't hide the rest, and a mechanical RPC-method coverage gate parsed from proto.go + tsgoChecker.ts
   - `triage-type-field-audit` — every data field stock puts on a Type crosses the bridge equal or carries an inline exemption
   - `triage-program-info` — program-info API stock differential (include reasons, explainFiles, resolution caches, ATA)
   - `triage-arena-parity` — arena-vs-JSON transport differential: every arena-capable method's result byte-equal across both transports

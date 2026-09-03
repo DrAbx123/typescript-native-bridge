@@ -21,6 +21,8 @@
 // witnesses job now creates). The batch triages
 // triage-typeq-batch (~69s) and triage-spellnb-batch (~65s) form wg6 (same
 // two-heavies shape as wg1-wg4); twelve ≤11s witnesses joined wg5 (~140s).
+// 2026-09-03: triage-checker-fullwalk joined wg5 (~2.6s measured — the
+// full-node checker walk with per-file tnb children, still a light).
 // Witnesses intentionally NOT in the matrix are local-only — the machine-
 // readable list lives in LOCAL_ONLY below (reasons: framework-checks /
 // external-edits need the /tmp/tnb-fw-fixtures installs (network;
@@ -40,7 +42,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const TOTAL = 82;
+const TOTAL = 83;
 
 // Witnesses intentionally NOT in the matrix — run on demand (reasons above).
 const LOCAL_ONLY = [
@@ -116,6 +118,7 @@ const groups = [
 			'triage-ghost-close',
 			'triage-rpcsym-adversarial',
 			'triage-checker-differential',
+			'triage-checker-fullwalk', // ~3s (measured 2026-09-03: 2.6s)
 			'triage-type-field-audit',
 			'triage-arena-parity',
 			'triage-worker-libpath',
