@@ -1785,19 +1785,21 @@ index 12b9d4079..db9750b1a 100644
  	return symbol == c.undefinedSymbol
  }
 diff --git a/internal/checker/types.go b/internal/checker/types.go
-index bd1342092..b9bfb60d7 100644
+index bd1342092..4d7865fd0 100644
 --- a/internal/checker/types.go
 +++ b/internal/checker/types.go
-@@ -746,6 +746,16 @@ func (t *Type) Target() *Type {
+@@ -746,6 +746,18 @@ func (t *Type) Target() *Type {
  	panic("Unhandled case in Type.Target")
  }
  
 +// ThisType returns the polymorphic this-type of a class/interface or tuple
-+// target (stock InterfaceType.thisType); nil for other type kinds. TupleType
-+// embeds InterfaceType, so the promoted accessor covers both data shapes.
++// target (stock InterfaceType.thisType); nil for other type kinds. Gate on
++// the data shape, not objectFlags: a reference re-created from a tuple's
++// objectFlags carries the Tuple flag while its data stays *TypeReference
++// (issues #69/#70), and stock keeps such references field-less.
 +func (t *Type) ThisType() *Type {
-+	if t.objectFlags&(ObjectFlagsClassOrInterface|ObjectFlagsTuple) != 0 {
-+		return t.AsInterfaceType().thisType
++	if iface := t.data.AsInterfaceType(); iface != nil {
++		return iface.thisType
 +	}
 +	return nil
 +}
@@ -1805,7 +1807,7 @@ index bd1342092..b9bfb60d7 100644
  func (t *Type) Mapper() *TypeMapper {
  	switch {
  	case t.flags&TypeFlagsObject != 0:
-@@ -903,6 +913,11 @@ type UniqueESSymbolType struct {
+@@ -903,6 +915,11 @@ type UniqueESSymbolType struct {
  	name string
  }
  
