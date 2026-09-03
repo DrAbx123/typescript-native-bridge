@@ -23,6 +23,8 @@
 // two-heavies shape as wg1-wg4); twelve ≤11s witnesses joined wg5 (~140s).
 // 2026-09-03: triage-checker-fullwalk joined wg5 (~2.6s measured — the
 // full-node checker walk with per-file tnb children, still a light).
+// 2026-09-03: shape census + census.ts corpus added — measured 4.4s (still
+// a light; wg5 headroom unchanged).
 // Witnesses intentionally NOT in the matrix are local-only — the machine-
 // readable list lives in LOCAL_ONLY below (reasons: framework-checks /
 // external-edits need the /tmp/tnb-fw-fixtures installs (network;
@@ -118,7 +120,7 @@ const groups = [
 			'triage-ghost-close',
 			'triage-rpcsym-adversarial',
 			'triage-checker-differential',
-			'triage-checker-fullwalk', // ~3s (measured 2026-09-03: 2.6s)
+			'triage-checker-fullwalk', // ~4.5s (measured 2026-09-03: 4.4s)
 			'triage-type-field-audit',
 			'triage-arena-parity',
 			'triage-worker-libpath',

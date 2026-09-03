@@ -116,6 +116,12 @@
  * have a COVERAGE entry (battery / field:<prop> / symbol-battery /
  * spec-battery / module-battery / exempt: <reason>) — a new RPC method
  * shipping unwalked turns the gate red.
+ * Full-walk also runs the shape census: every canonType'd type records its
+ * TypeFlags/ObjectFlags set bits per child, and the parent gates the union
+ * against the fork bundle's enums — every structural bit must be produced
+ * on both sides or carry a CENSUS_EXEMPT reason (stale-fail if observed).
+ * Cast outcomes are shape-pure, so census + F1 prove every (method × shape)
+ * pair is exercised per run.
  *
  * Usage: node tools/triage-checker-differential.mjs
  *        node tools/triage-checker-differential.mjs --self-test
@@ -201,8 +207,9 @@ const KNOWN_DIVERGENCES = new Map((() => {
 // shapes (unchecked, like U3). The JS classes were surfaced by the walk's
 // new js/ corpus (checkJs path) — engine-model differences, attribution to
 // be confirmed against pristine tsgo before treating any as a bridge bug.
-const FW_KEYOF_TARGET = 'FW: keyof-type target — the bridge carries target on the keyof type, stock leaves it absent (field-model delta)';
-const FW_MAPPED_TARGET = 'FW: mapped-instantiation target — stock links the anonymous source via target, tsgo has no Reference-style target for mapped types (triage-type-field-audit conditionalExemption)';
+const FW_KEYOF_TARGET = 'FW: target-slot name — stock names the Index/StringMapping slot `type` (IndexType/StringMappingType), the bridge names the same slot `target` (proto.go Target); the walk reads the wire name, so stock reads undefined while the bridge carries the operand (triage-type-field-audit field-name mapping type↔target)';
+const FW_MAPPED_TARGET = 'FW: mapped-type target — stock links a mapped type (alias reference or instantiation) to its source via target, tsgo has no Reference-style target handle for mapped types (triage-type-field-audit conditionalExemption)';
+const FW_SUBST_CONSTRAINT = 'FW: substitution-constraint slot — stock\'s SubstitutionType exposes the NoInfer constraint as `constraint`, the bridge as the wire field `substConstraint` (with the stock name aliased onto it); the walk reads the wire name, so stock reads undefined while the bridge carries the constraint (AGENTS.md accepted tradeoff: SubstitutionType.constraint alias is code-path parity only — first reliable source-level trigger)';
 const FW_TUPLE_ELISION = 'FW: instantiated-tuple display — stock renders tuple references as [...] inside signature instantiations, tsgo renders the element types (stock tuple-reference display model)';
 const ERR_ABS = 'ERR: errored declaration resolution — stock resolves the abstract-instantiation error to the error type (rendered any), tsgo keeps the declared class type (engine error-type model on erroneous programs)';
 const JS_MODEL = 'JS: CJS module model — tsgo shapes module/exports symbols and require-destructured types differently from stock (exports = Property|ModuleExports vs ValueModule; module type = export object vs typeof import; literal widening through destructuring); engine checkJs model, pristine-tsgo attribution pending';
@@ -230,6 +237,19 @@ const FULLWALK_KNOWN = new Map((() => {
 	add(FW_KEYOF_TARGET,
 		["field:target"],
 		["types.ts:191:TypeOperator[t]"]);
+	// census.ts — the shape-census corpus: the same field-model classes at the
+	// new labels the constructs produce (target-slot on keyof/StringMapping,
+	// mapped-type target on M1/M2 references, substitution-constraint slot on
+	// NoInfer<T>). The reverse-mapped instantiation itself converges.
+	add(FW_KEYOF_TARGET,
+		["field:target"],
+		["census.ts:742:TypeOperator[t]", "census.ts:781:TypeOperator[t]", "census.ts:410:VariableDeclaration[t]", "census.ts:410:Identifier[t]", "census.ts:410:Identifier[t1]", "census.ts:414:TypeReference[t]"]);
+	add(FW_SUBST_CONSTRAINT,
+		["field:substConstraint"],
+		["census.ts:620:Parameter[t]", "census.ts:620:Identifier[t]", "census.ts:620:Identifier[t1]", "census.ts:622:TypeReference[t]"]);
+	add(FW_MAPPED_TARGET,
+		["field:target"],
+		["census.ts:825:Parameter[t]", "census.ts:825:Identifier[t]", "census.ts:825:Identifier[t1]", "census.ts:827:TypeReference[t]", "census.ts:846:Identifier[t]", "census.ts:846:Identifier[t1]", "census.ts:880:VariableDeclaration[t]", "census.ts:880:Identifier[t]", "census.ts:880:Identifier[t1]", "census.ts:887:TypeReference[t]", "census.ts:949:Identifier[t]", "census.ts:949:Identifier[t1]"]);
 	add(FW_TUPLE_ELISION,
 		["getPropertiesOfType", "getApparentProperties"],
 		["types.ts:1128:Parameter", "types.ts:1128:Identifier", "types.ts:1133:TupleType", "types.ts:1188:Identifier"]);
@@ -256,6 +276,94 @@ const FULLWALK_KNOWN = new Map((() => {
 		["js/consumer.js:7:Identifier", "js/consumer.js:18:Identifier", "js/consumer.js:26:Identifier", "js/consumer.js:31:Identifier", "js/consumer.js:71:Identifier", "js/consumer.js:98:Identifier", "js/consumer.js:119:Identifier"]);
 	return keys;
 })());
+
+// ── Shape census (--full-walk) ─────────────────────────────────────────────
+// The #69/#70/#71 panic class: Go As*() casts succeed/fail purely by the
+// type's data shape, stamped at construction and observed on the wire as
+// flags/objectFlags. If every structural bit appears in the corpus on both
+// sides, every (battery × shape) pair is exercised per run. Children record
+// the set bits of every canonType'd type (the only canon path that carries
+// shape data — canonProp/canonSig compare type strings only); the parent
+// unions per side and gates the union against the fork bundle's enums (the
+// enum-remap gate already guarantees the wire delivers these layouts, so the
+// bundle is the same source of truth, not a second one).
+//
+// Derivation: single-bit positive entries only — power of two, objectFlags
+// ≤ 1<<14 (the N1 structural mask; ≥ 1<<15 are stock lazy bookkeeping).
+// Combined aliases (UnionOrIntersection, Literal, AnyOrUnknown, …) fall out
+// mechanically. The Includes* TypeFlags are single-bit re-aliases of existing
+// positions (stock declares IncludesMissingType === TypeParameter, …) —
+// dedup by value, first declaration wins: the wire cannot distinguish them
+// and one observation proves the position.
+const CENSUS_FLAG_MAX = 1 << 30; // flags bits 0..30 (bit 31 = Reserved3, negative in the enum)
+const CENSUS_OF_MAX = 1 << 14; // N1 structural mask
+// For a value v, the individual set bits as powers of two (0b101 → [1, 4]).
+function decomposeBits(v, max) {
+	const out = [];
+	for (let b = 1; b <= max; b *= 2) if (v & b) out.push(b);
+	return out;
+}
+function censusBitNames(enumObj, max) {
+	const names = new Map(); // bit value → name
+	for (const [name, v] of Object.entries(enumObj)) {
+		if (typeof v !== 'number' || v <= 0 || (v & (v - 1)) !== 0 || v > max) continue;
+		if (!names.has(v)) names.set(v, name);
+	}
+	return names;
+}
+// Bits genuinely not producible as a node's type in this harness. A bit
+// observed despite its exemption FAILs as stale (same anti-rot pattern as
+// KNOWN_DIVERGENCES / asguard).
+const CENSUS_TF_EXEMPT = new Map([
+	['Reserved1', 'reserved TypeFlags bit 29 — never stamped by either engine'],
+	['Reserved2', 'reserved TypeFlags bit 30 — never stamped by either engine'],
+]);
+const CENSUS_OF_EXEMPT = new Map([
+	// Evolving-array types are transient checker state (evolvingArrayTypes):
+	// by the time a program settles, getTypeAtLocation/getTypeOfSymbolAtLocation/
+	// getDeclaredTypeOfSymbol return the evolved or any[] array, never the
+	// EvolvingArray-flagged auto type (verified against stock with the
+	// const a = []; a.push(1) pattern — the flag never surfaces).
+	['EvolvingArray', 'transient checker state — replaced before the walk\'s queries run; not observable through the walk\'s three primaries'],
+	// JSX-only flag: the corpus has no JSX files — the COVERAGE gate exempts
+	// the JSX paths, and JSX parity rides the framework-checks witness.
+	['JsxAttributes', 'JSX-only flag — the corpus has no JSX (JSX paths are exempt in COVERAGE; parity rides framework-checks)'],
+]);
+
+function censusGate(tfNames, ofNames, tfExempt, ofExempt, stock, tnb) {
+	const errors = [];
+	const gates = [];
+	const runEnum = (kind, names, exempt, sArr, tArr) => {
+		const nameOf = new Map([...names].map(([v, n]) => [n, v]));
+		const s = new Set(sArr), t = new Set(tArr);
+		// Observed bit with no single-bit enum entry: the enums no longer
+		// describe the wire (bridge/enum-remap bug or a missing exemption).
+		for (const [side, set] of [['stock', s], ['tnb', t]]) {
+			const unknown = [...set].filter(b => !names.has(b));
+			if (unknown.length) errors.push(`CENSUS-FAIL ${kind} bit(s) ${unknown.join(', ')} observed on ${side} with no single-bit enum entry`);
+		}
+		// Exemptions must stay true: observed means the reason rotted.
+		const exemptBits = new Set();
+		for (const [name, reason] of exempt) {
+			const v = nameOf.get(name);
+			if (v === undefined) { errors.push(`CENSUS-FAIL ${kind} exemption ${name} names no derived bit (typo or the enum dropped it)`); continue; }
+			exemptBits.add(v);
+			if (s.has(v) || t.has(v)) errors.push(`CENSUS-FAIL stale ${kind} exemption ${name} — ${reason} (observed on ${s.has(v) ? (t.has(v) ? 'both sides' : 'stock') : 'tnb'})`);
+		}
+		const expected = [...names.keys()].filter(b => !exemptBits.has(b));
+		for (const [side, set] of [['stock', s], ['tnb', t]]) {
+			const miss = expected.filter(b => !set.has(b));
+			if (miss.length) errors.push(`CENSUS-FAIL ${kind} missing from ${side}: ${miss.map(b => names.get(b)).join(', ')}`);
+		}
+		const both = expected.filter(b => s.has(b) && t.has(b));
+		gates.push({ both: both.length, total: expected.length });
+	};
+	runEnum('type-flag', tfNames, tfExempt, stock.f, tnb.f);
+	runEnum('object-flag', ofNames, ofExempt, stock.of, tnb.of);
+	const [tf, of] = gates;
+	const summary = `census: ${tf.both}/${tf.total} type-flag bits, ${of.both}/${of.total} object-flag bits, both sides`;
+	return { errors, summary };
+}
 
 // ── Corpus ─────────────────────────────────────────────────────────────────
 const MAIN_TSCONFIG = {
@@ -411,6 +519,26 @@ declare global {
 const s = 'x';
 export const probe: number = s.tnbProbe();
 `,
+	// Shape-census coverage — each construct produces a TypeFlags/ObjectFlags
+	// structural bit the walk must observe on both sides (see the census gate)
+	'census.ts': `export const flag: boolean = true; // Boolean + BooleanLiteral
+export const big: bigint = 10n; // BigInt + BigIntLiteral
+export const symTyped: symbol = Symbol(); // ESSymbol
+export const uniq = Symbol(); // UniqueESSymbol
+export function fail(): never { throw new Error('x'); } // Never
+export type Both = { a: string } & { b: number }; // Intersection
+export const both: Both = { a: 'x', b: 1 };
+export const up: Uppercase<string> = 'X'; // StringMapping
+export function prefix<T extends string>(x: \`pfx-\${T}\`): \`pfx-\${T}\` { return x; } // TemplateLiteral
+export const pre = prefix('a');
+export function noInferArg<T>(x: NoInfer<T>): T { return x; } // Substitution (NoInfer)
+interface E { id: string; tags: string[]; }
+type M1<T> = { [K in keyof T]: T[K] };
+type M2<T> = { [K in keyof T]: T[K] };
+export function unmap<T>(m: M2<T>): T { return m as unknown as T; }
+export const m1val: M1<E> = { id: 'x', tags: [] };
+export const unmapped = unmap(m1val); // ReverseMapped: M1 != M2 dodges the target identity fast path
+`,
 	// JS project (checkJs): JSDoc-typed exports, object literals (JSLiteral
 	// objectFlags), module.exports — exercised through the js/ config only
 	'js/plain.js': `/**
@@ -426,6 +554,14 @@ const entity = { id: 'a', tags: ['x'] };
 const lit = 'hello';
 const obj = { a: 1, b: 'two' };
 module.exports = { fetchData, entity, lit, obj };
+// computed-key destructure: the binding-pattern type carries
+// ObjectLiteralPatternWithComputedProperties (512) when the key type is not
+// a usable property name — checkJs builds it error-free (implicit-any is a
+// TS error, not a JS one)
+/** @type {string} */
+const dynKey = 'a';
+function computedPat({ [dynKey]: v }) { return v; }
+computedPat({ a: 1 });
 `,
 	'js/consumer.js': `const { fetchData, entity, lit, obj } = require('./plain');
 const out = fetchData('k');
@@ -747,6 +883,10 @@ function runSide(side, dir) {
 	const tBuildEnd = Date.now();
 	const entries = [];
 	const rec = (m, at, v) => entries.push({ m, at, v });
+	// Shape census (full-walk only): canonType is the only canon path that
+	// records flags/objectFlags, so the set bits it collects are exactly the
+	// shapes the differential compares.
+	const census = FULLWALK ? { f: new Set(), of: new Set() } : null;
 
 	for (const proj of FULLWALK ? ['main', 'cjs', 'js'] : ['main', 'cjs']) {
 		const { program } = programs[proj];
@@ -785,7 +925,12 @@ function runSide(side, dir) {
 		const canonType = t => {
 			if (t == null) return null;
 			if (t.$err) return t;
-			return { s: tryQ(() => canonTypeStr(checker.typeToString(t))), f: t.flags >>> 0, of: (t.objectFlags ?? 0) & 0x7fff };
+			const f = t.flags >>> 0, of = (t.objectFlags ?? 0) & 0x7fff;
+			if (census) {
+				for (const b of decomposeBits(f, CENSUS_FLAG_MAX)) census.f.add(b);
+				for (const b of decomposeBits(of, CENSUS_OF_MAX)) census.of.add(b);
+			}
+			return { s: tryQ(() => canonTypeStr(checker.typeToString(t))), f, of };
 		};
 		const canonProp = (s, locNode) => {
 			if (s == null || s.$err) return canonSym(s);
@@ -1028,7 +1173,11 @@ function runSide(side, dir) {
 
 	for (const p of Object.values(programs)) p.watch.close?.();
 	if (!FULLWALK) return { side, entries };
-	return { side, file: FULLWALK_FILE ?? 'all', entries, timing: { buildMs: tBuildEnd - tBuildStart, walkMs: Date.now() - tBuildEnd } };
+	return {
+		side, file: FULLWALK_FILE ?? 'all', entries,
+		timing: { buildMs: tBuildEnd - tBuildStart, walkMs: Date.now() - tBuildEnd },
+		census: census ? { f: [...census.f].sort((a, b) => a - b), of: [...census.of].sort((a, b) => a - b) } : null,
+	};
 }
 
 // ── Compare (parent mode) ──────────────────────────────────────────────────
@@ -1511,8 +1660,26 @@ async function parentMainFullWalk() {
 	const st = stock.timing;
 	const tt = okFiles.reduce((a, r) => ({ build: a.build + r.result.timing.buildMs, walk: a.walk + r.result.timing.walkMs }), { build: 0, walk: 0 });
 	console.log(`timing: stock build ${(st.buildMs / 1000).toFixed(1)}s + walk ${(st.walkMs / 1000).toFixed(1)}s; tnb ${okFiles.length} children: build ${(tt.build / 1000).toFixed(1)}s + walk ${(tt.walk / 1000).toFixed(1)}s (sum) over ${((t2 - t1) / 1000).toFixed(1)}s wall; total ${((t2 - t0) / 1000).toFixed(1)}s`);
-	const verdict = finalVerdict({ crashes: crashes.length, fail });
-	console.log(`\nVERDICT: ${verdict} (${ok} ok, ${known} known, ${fail} diffs${crashes.length ? `, ${crashes.length} crashes` : ''})`);
+	// Shape census: union per side (a crashed child just contributes nothing —
+	// the crash already FAILs the run), then gate the union against the fork
+	// bundle's enums.
+	const tnbCensus = { f: new Set(), of: new Set() };
+	for (const r of okFiles) {
+		for (const b of r.result.census.f) tnbCensus.f.add(b);
+		for (const b of r.result.census.of) tnbCensus.of.add(b);
+	}
+	const ts = require2(tnbTsPath);
+	const census = censusGate(
+		censusBitNames(ts.TypeFlags, CENSUS_FLAG_MAX),
+		censusBitNames(ts.ObjectFlags, CENSUS_OF_MAX),
+		CENSUS_TF_EXEMPT, CENSUS_OF_EXEMPT,
+		{ f: stock.census.f, of: stock.census.of },
+		{ f: [...tnbCensus.f], of: [...tnbCensus.of] },
+	);
+	for (const e of census.errors) console.error(e);
+	console.log(census.summary);
+	const verdict = finalVerdict({ crashes: crashes.length, fail: fail + census.errors.length });
+	console.log(`\nVERDICT: ${verdict} (${ok} ok, ${known} known, ${fail} diffs${crashes.length ? `, ${crashes.length} crashes` : ''}${census.errors.length ? `, ${census.errors.length} census fails` : ''})`);
 	process.exit(verdict === 'PASS' ? 0 : 1);
 }
 
@@ -1617,6 +1784,26 @@ function selfTest() {
 		=== stable([{ name: 'a', flags: 1, decls: [], t: 'y' }, { name: 'b', flags: 1, decls: [], t: 'x' }]));
 	check('synthetic crashed tnb child forces VERDICT FAIL',
 		finalVerdict({ crashes: 1, fail: 0 }) === 'FAIL' && finalVerdict({ crashes: 0, fail: 0 }) === 'PASS');
+
+	// Shape census: bit decomposition, missing-expected FAIL, stale-exemption FAIL.
+	check('census bit decomposition 0b101 → [1, 4]', JSON.stringify(decomposeBits(0b101, CENSUS_FLAG_MAX)) === '[1,4]');
+	const cenTf = new Map([[1, 'Any'], [2, 'Unknown'], [4, 'Undefined']]);
+	const cenOf = new Map([[1, 'Class'], [2, 'Interface']]);
+	let g = censusGate(cenTf, cenOf, new Map(), new Map(),
+		{ f: [1, 2], of: [1, 2] }, { f: [2, 4], of: [1, 2] });
+	check('census: expected bit missing from one side forces CENSUS-FAIL',
+		g.errors.length === 2
+		&& g.errors.some(e => e === 'CENSUS-FAIL type-flag missing from stock: Undefined')
+		&& g.errors.some(e => e === 'CENSUS-FAIL type-flag missing from tnb: Any'));
+	const cenRes = new Map([[1, 'Any'], [CENSUS_FLAG_MAX, 'Reserved2']]);
+	g = censusGate(cenRes, new Map(), new Map([['Reserved2', 'reserved bit']]), new Map(),
+		{ f: [1, CENSUS_FLAG_MAX], of: [] }, { f: [1], of: [] });
+	check('census: observed exempted bit forces stale CENSUS-FAIL',
+		g.errors.length === 1 && g.errors[0] === 'CENSUS-FAIL stale type-flag exemption Reserved2 — reserved bit (observed on stock)');
+	g = censusGate(cenTf, cenOf, new Map(), new Map(),
+		{ f: [1, 2, 4], of: [1, 2] }, { f: [1, 2, 4], of: [1, 2] });
+	check('census: all expected bits on both sides pass with an N/M summary',
+		g.errors.length === 0 && g.summary === 'census: 3/3 type-flag bits, 2/2 object-flag bits, both sides');
 
 	console.log(failed === 0 ? '\nSELF-TEST: PASS' : `\nSELF-TEST: FAIL (${failed} assertions)`);
 	process.exit(failed === 0 ? 0 : 1);
