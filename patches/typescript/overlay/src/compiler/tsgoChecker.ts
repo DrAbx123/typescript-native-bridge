@@ -2377,13 +2377,12 @@ const _pendingOverlayEditsByFile: Map<string, { start: number; deleteLength: num
  * #49). Every signal source — watch callbacks (watchPublic onSourceFileChange
  * / wildcard-directory / tnbWatchSourceFile registrations), tsserver
  * ScriptInfo reloadForOpen/editContent, ProjectService.onSourceFileChanged —
- * feeds this set and nothing else; the createTsgoProgram overlay collect is
- * the single choke that decides the transport: host text diverging from disk
- * rides the normal overlay push, host text equal to CURRENT disk becomes
- * updateSnapshot fileChanges.changed (Go's SnapshotFS froze the FIRST disk
- * read, so "same as disk" is not "same as Go saw" — the changed entry drops
- * the frozen entry and Go re-reads). Process-global: it mirrors the shared
- * tsgo session's disk view.
+ * feeds this set and nothing else; Program creation and in-place overlay sync
+ * drain it through takeExternalFileChanges. Open host snapshots ride the
+ * overlay push; disk-backed files without an overlay use fileChanges.changed.
+ * Go's SnapshotFS froze the FIRST disk read, so "same as disk" is not "same
+ * as Go saw" — the changed entry drops the frozen entry and Go re-reads.
+ * Process-global: it mirrors the shared tsgo session's disk view.
  */
 const _pendingExternalChangePaths: Set<string> = tnbBridgeProcessState().pendingExternalChangePaths ??= new Set();
 
@@ -2394,6 +2393,18 @@ const _pendingExternalChangePaths: Set<string> = tnbBridgeProcessState().pending
  */
 export function tnbNoteExternalFileChange(fileName: string): void {
     _pendingExternalChangePaths.add(resolveHostFileName(fileName));
+}
+
+function takeExternalFileChanges(): Set<string> | undefined {
+    if (!_pendingExternalChangePaths.size) return undefined;
+    const changed = new Set(_pendingExternalChangePaths);
+    _pendingExternalChangePaths.clear();
+    // Constant-version hosts must not retain a stale bound declaration AST
+    // after the native snapshot has re-read an external disk rewrite.
+    for (const fileName of changed) {
+        if (isStableHostSfPath(fileName)) _hostSfStableGlobal.delete(fileName);
+    }
+    return changed;
 }
 
 /**
@@ -7079,29 +7090,16 @@ export function createTsgoProgram(
             }
             return !!(lsHost?.getScriptSnapshot?.(fn) ?? lsHost?.getScriptSnapshot?.(resolvedFn));
         };
-        // Drain the external-change signals (issue #49) — every source only
-        // feeds the set; this collect is the single choke deciding transport.
+        // Drain external-change signals for this newly created Program.
         // The wire list is host==disk files Go must re-read (fileChanges.changed):
         // Go's SnapshotFS froze each disk file at FIRST read, so a host text
         // equal to CURRENT disk can still differ from Go's frozen view. Files
         // with a synced overlay are excluded — the overlay already supersedes
         // disk in Go's reads. Gone-from-disk files are excluded — their
         // rootNames/params churn drives a real snapshot on its own.
-        if (_pendingExternalChangePaths.size > 0) {
-            pendingExternalSet = new Set(_pendingExternalChangePaths);
-            _pendingExternalChangePaths.clear();
+        pendingExternalSet = takeExternalFileChanges();
+        if (pendingExternalSet) {
             for (const f of pendingExternalSet) {
-                // Stable host-SF cache eviction: an externally-rewritten
-                // stable-path file (node_modules/lib .d.ts) must not keep
-                // serving the process-global bound AST. Go re-reads disk via
-                // fileChanges.changed, but a constant-version host
-                // (typescript-estree getScriptVersion "1") makes the stable
-                // version check below match forever — evict the entry so the
-                // next materialization re-reads host/disk like Go does. The
-                // per-program sfCache is empty at this choke (fresh per
-                // createTsgoProgram, populated only by later materialization),
-                // so the process-global entry is the only stale cache.
-                if (isStableHostSfPath(f)) _hostSfStableGlobal.delete(f);
                 if (fileExistsOnDisk(f) && !_syncedOverlayContentByFile.has(f)) (externalChanged ??= []).push(f);
             }
         }
@@ -7156,15 +7154,12 @@ export function createTsgoProgram(
             // creation pays text only, not one JS AST per virtual file (B-1).
             // Pure disk lint skips this and uses tsgo-backed single-parse.
             if (!shouldSendHostOverlay(resolvedFn, content.text)) {
-                // Host matches disk again after a prior overlay — re-push on-disk text
-                // so tsgo does not keep checking stale overlay content.
-                const synced = _syncedOverlayContentByFile.get(resolvedFn);
-                if (synced !== undefined && synced !== content.text) {
-                    forgetSyncedOverlay(resolvedFn);
-                    overlays.push({ fileName: resolvedFn, content: content.text, scriptKind: content.scriptKind });
-                }
-                else if (synced !== undefined) {
-                    forgetSyncedOverlay(resolvedFn);
+                // Native overlays remain open when an editor saves. Retain
+                // their mirror until closeFiles so later disk-equal edits
+                // cannot leave an untracked stale overlay in the session.
+                if (_syncedOverlayContentByFile.has(resolvedFn)) {
+                    const entry = decideOverlayPush(resolvedFn, content.text, content.scriptKind);
+                    if (entry) overlays.push(entry);
                 }
                 continue;
             }
@@ -10182,21 +10177,21 @@ export function createTsgoChecker(program: any): any {
         if (!syncHost) return;
 
         const openFiles = collectTsgoOpenFileNames(syncHost, requestedFileName ? [requestedFileName] : undefined);
+        const externalChanges = takeExternalFileChanges();
         const openFilesWithContent: { fileName: string; content: string; scriptKind: number }[] = [];
         for (const hostFileName of openFiles) {
             if (!isOverlayCandidatePath(hostFileName)) continue;
             const content = getHostScriptContent(syncHost, hostFileName, ctx.options);
-            if (!content?.text) continue;
+            if (!content) continue;
             const hostOnly = !fileExistsOnDisk(hostFileName);
             const inTsgo = !!project?.program?.getSourceFile?.(toTsgoFileName(hostFileName));
             if (!hostOnly && inTsgo && !shouldSendHostOverlay(hostFileName, content.text)) {
-                const synced = _syncedOverlayContentByFile.get(hostFileName);
-                if (synced !== undefined && synced !== content.text) {
-                    forgetSyncedOverlay(hostFileName);
-                    openFilesWithContent.push({ fileName: hostFileName, content: content.text, scriptKind: content.scriptKind });
-                }
-                else if (synced !== undefined) {
-                    forgetSyncedOverlay(hostFileName);
+                // Current disk equality says nothing about the frozen native
+                // disk view. An external edit to an open file must publish
+                // its host snapshot even before its first unsaved overlay.
+                if (_syncedOverlayContentByFile.has(hostFileName) || externalChanges?.has(hostFileName)) {
+                    const entry = decideOverlayPush(hostFileName, content.text, content.scriptKind);
+                    if (entry) openFilesWithContent.push(entry);
                 }
                 continue;
             }
@@ -10208,7 +10203,10 @@ export function createTsgoChecker(program: any): any {
             }
             openFilesWithContent.push({ fileName: hostFileName, content: content.text, scriptKind: content.scriptKind });
         }
-        if (!openFiles.length && !openFilesWithContent.length) return;
+        const pushed = new Set(openFilesWithContent.map(f => f.fileName));
+        const changedFiles = externalChanges ? [...externalChanges].filter(f =>
+            fileExistsOnDisk(f) && !_syncedOverlayContentByFile.has(f) && !pushed.has(f)) : [];
+        if (!openFiles.length && !openFilesWithContent.length && !changedFiles.length) return;
 
         // No-change fast path: bumping the snapshot here would dispose the
         // handle registry the reused thin program's caches still reference
@@ -10222,13 +10220,14 @@ export function createTsgoChecker(program: any): any {
         // empty snapshot. ensureProject records the same key after its own
         // snapshot so the first query sync after a rebuild is a no-op too.
         const pushKey = openFiles.join("\n");
-        if (openFilesWithContent.length === 0 && _lastOverlayPushKeyByConfig.get(ctx.configFilePath) === pushKey) return;
+        if (openFilesWithContent.length === 0 && changedFiles.length === 0 && _lastOverlayPushKeyByConfig.get(ctx.configFilePath) === pushKey) return;
 
         traceOverlaySync(openFilesWithContent, /*deduped*/ false);
         const snapshot: any = _api.updateSnapshot({
             openProject: openProjectParam(ctx.configFilePath, ctx.options),
             ...(openFiles.length > 0 ? { openFiles } : {}),
             openFilesWithContent,
+            ...(changedFiles.length ? { fileChanges: { changed: changedFiles } } : {}),
             ...(_lastExtraFileExtensions ? { extraFileExtensions: _lastExtraFileExtensions } : {}),
             // Host-injected extra roots (svelte2tsx/glint shims) — without them
             // every hook-driven rebuild drops the ambient shim files from the
@@ -10255,14 +10254,16 @@ export function createTsgoChecker(program: any): any {
         installTsgoBackedSourceFileLoader(() => project);
         for (const f of openFilesWithContent) {
             commitSyncedOverlay(f);
-            tsgoSfCache.delete(f.fileName);
-            nodeIndexCache.delete(f.fileName);
-            nodeAtPosCache.delete(f.fileName);
+        }
+        for (const fileName of [...pushed, ...changedFiles]) {
+            tsgoSfCache.delete(fileName);
+            nodeIndexCache.delete(fileName);
+            nodeAtPosCache.delete(fileName);
             // The Go snapshot advanced; the JS-side host SourceFile caches for
             // this file are now stale (sfCache keys on a constant host version),
             // so drop them too or semantic highlights/diagnostics walk the old
             // AST against the new snapshot.
-            programCtx?.thinProgram?.__tnbInvalidateHostSourceFile?.(f.fileName);
+            programCtx?.thinProgram?.__tnbInvalidateHostSourceFile?.(fileName);
         }
         // Every updateSnapshot REPLACES the Go snapshot and disposes the
         // previous generation's handle registry — the caches below all hold

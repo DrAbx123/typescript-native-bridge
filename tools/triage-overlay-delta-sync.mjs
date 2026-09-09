@@ -27,6 +27,7 @@ fs.rmSync(traceFile, { force: true });
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tnb-delta-'));
 const mainTs = path.join(dir, 'main.ts');
 const otherTs = path.join(dir, 'other.ts');
+const freshTs = path.join(dir, 'fresh.ts');
 fs.writeFileSync(path.join(dir, 'tsconfig.json'), JSON.stringify({
 	compilerOptions: { strict: true, noEmit: true, target: 'es2022' },
 	include: ['*.ts'],
@@ -38,10 +39,11 @@ const otherV0 = `export const other = "v1";
 `;
 fs.writeFileSync(mainTs, mainV0);
 fs.writeFileSync(otherTs, otherV0);
+fs.writeFileSync(freshTs, 'export const fresh = 1;\n');
 
 // Host-text mirror: the witness composes every edit locally so query
 // positions are computed from the true current text, never hand-counted.
-const hostText = new Map([[mainTs, mainV0], [otherTs, otherV0]]);
+const hostText = new Map([[mainTs, mainV0], [otherTs, otherV0], [freshTs, 'export const fresh = 1;\n']]);
 function lineCol(text, index) {
 	const pre = text.slice(0, index).split('\n');
 	return { line: pre.length, offset: pre[pre.length - 1].length + 1 };
@@ -64,6 +66,7 @@ await withTsserver(
 		await send('updateOpen', { changedFiles: [], closedFiles: [], openFiles: [
 			{ file: mainTs, fileContent: mainV0, projectRootPath: dir },
 			{ file: otherTs, fileContent: otherV0, projectRootPath: dir },
+			{ file: freshTs, fileContent: hostText.get(freshTs), projectRootPath: dir },
 		] }, CMD);
 		const warm = await send('quickinfo', { file: mainTs, line: 2, offset: 7 }, CMD);
 		if (!warm?.success) fail(`warm quickinfo unsuccessful: ${warm?.message}`);
@@ -103,6 +106,36 @@ await withTsserver(
 		const d4 = await qiAt(otherTs, 'other', 'round2');
 		if (!d4.includes('v2-longer')) fail(`round2 other: ${JSON.stringify(d4)}`);
 		else console.log(`ok round2 other: ${d4}`);
+
+		// Saving a buffer makes host text equal to disk, but must not forget
+		// the native overlay. A subsequent filesystem rewrite reaches the
+		// editor as an incremental change with the new disk text already live.
+		fs.writeFileSync(mainTs, hostText.get(mainTs));
+		await qiAt(mainTs, 'before', 'saved');
+		// The second file has never had an overlay, so it also checks native
+		// disk-cache invalidation independently of saved-overlay bookkeeping.
+		for (const file of [mainTs, freshTs]) {
+			const saved = hostText.get(file);
+			const externalError = '\nexport const externalValue: string = 1;\n';
+			fs.writeFileSync(file, saved + externalError);
+			await edit(send, file, saved.length, 0, externalError);
+			const badDisk = await send('semanticDiagnosticsSync', { file }, CMD);
+			if (!badDisk?.success || !badDisk.body?.some(d => d.code === 2322)) {
+				fail(`${path.basename(file)} external append must report TS2322: ${JSON.stringify(badDisk)}`);
+			}
+			fs.writeFileSync(file, '');
+			await edit(send, file, 0, hostText.get(file).length, '');
+			const emptied = await send('semanticDiagnosticsSync', { file }, CMD);
+			if (!emptied?.success || emptied.body?.length) {
+				fail(`${path.basename(file)} external empty file must clear diagnostics: ${JSON.stringify(emptied)}`);
+			}
+			fs.writeFileSync(file, saved);
+			await edit(send, file, 0, 0, saved);
+			const restoredDisk = await send('semanticDiagnosticsSync', { file }, CMD);
+			if (!restoredDisk?.success || restoredDisk.body?.length) {
+				fail(`${path.basename(file)} external restore must clear diagnostics: ${JSON.stringify(restoredDisk)}`);
+			}
+		}
 	},
 );
 
