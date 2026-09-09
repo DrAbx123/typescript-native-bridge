@@ -161,6 +161,8 @@ Compiler API.
   code performs type checking and declaration generation. JavaScript `before` /
   `after` transforms, declaration maps and bundles with custom transforms fail
   explicitly rather than dropping the requested transform.
+- `Program.emit` rejects `outFile` bundles explicitly: the native emitter produces
+  individual files and cannot satisfy a bundled-output request.
 - `allowArbitraryExtensions` is inferred `true` when host extra extensions are present
   and tsconfig leaves it unset; explicit `false` opts out.
 - **Not supported:** custom `resolveModuleNames` / `resolveModuleNameLiterals` that

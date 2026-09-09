@@ -8153,6 +8153,20 @@ export function createTsgoProgram(
         return liveProject();
     };
 
+    const hostEmitFileName = (fileName: string): string => {
+        if (fileName.endsWith(".tsbuildinfo")) return getTsBuildInfoEmitOutputFilePath(options) ?? fileName;
+        // Native compiler options use absolute directories. Program.emit's
+        // callback must preserve the caller's relative directory spelling;
+        // bundlers use it to place declarations under their own output root.
+        const outputDir = (/\.d\.(?:ts|mts|cts)(?:\.map)?$/.test(fileName) ? options.declarationDir || options.outDir : options.outDir) || undefined;
+        if (outputDir === undefined || ts.isRootedDiskPath(outputDir)) return fileName;
+        // Native project output paths are resolved from its config directory,
+        // which can differ from the host cwd used by a bundler's callback.
+        const currentDirectory = ts.getDirectoryPath(configFilePath);
+        return ts.combinePaths(outputDir, ts.getRelativePathFromDirectory(
+            ts.getNormalizedAbsolutePath(outputDir, currentDirectory), fileName, !_tsgoUseCaseSensitive));
+    };
+
     const thinProgram: any = {
         // Marks this as a tsgo-backed program: its SourceFiles come straight from
         // tsgo and are never acquired via the LanguageService document registry.
@@ -8576,6 +8590,9 @@ export function createTsgoProgram(
             if (afterDeclarations?.length && (options.declarationMap || options.outFile)) {
                 throw new Error("tsgoChecker: afterDeclarations customTransformers require declarationMap=false and no outFile — transformed declaration maps and bundles are not supported");
             }
+            if (options.outFile) {
+                throw new Error("tsgoChecker: Program.emit does not support outFile bundles — tsgo emits individual files");
+            }
             // Stock handleNoEmitOptions (emitWorker runs it before any real
             // emit): under --noEmit a whole-program emit degenerates to
             // program.emitBuildInfo — emitSkipped: false, tsbuildinfo written
@@ -8609,7 +8626,7 @@ export function createTsgoProgram(
             for (const o of outputs) {
                 // Go-computed output path — crosses the wire boundary before
                 // reaching writeFile/emittedFiles consumers.
-                const outFileName = wireFileNameToHost(o.fileName);
+                const outFileName = hostEmitFileName(wireFileNameToHost(o.fileName));
                 let text = o.text;
                 if (afterDeclarations?.length && /\.d\.(?:ts|mts|cts)$/.test(outFileName)) {
                     const declaration = createSourceFile(outFileName, text, options.target ?? 99, /*setParentNodes*/ true, ts.ScriptKind.TS);
@@ -8632,9 +8649,14 @@ export function createTsgoProgram(
                 if (write) write(outFileName, text, !!o.writeByteOrderMark, undefined, sourceFiles, {});
                 emittedFiles?.push(outFileName);
             }
+            // The native API exposes build-info emit separately. Stock's
+            // whole-program emit includes it in the same callback/result.
+            const buildInfo = !targetSourceFile && !res?.emitSkipped && !outputs.some((o: any) => o.fileName.endsWith(".tsbuildinfo"))
+                ? thinProgram.emitBuildInfo(writeFile, _ct) : undefined;
+            emittedFiles?.push(...buildInfo?.emittedFiles ?? []);
             return {
-                emitSkipped: res?.emitSkipped ?? false,
-                diagnostics: [...mapTsgoDiagnostics(res?.diagnostics, getDiagnosticSourceFile), ...transformerDiagnostics],
+                emitSkipped: (res?.emitSkipped ?? false) || (buildInfo?.emitSkipped ?? false),
+                diagnostics: [...mapTsgoDiagnostics(res?.diagnostics, getDiagnosticSourceFile), ...transformerDiagnostics, ...buildInfo?.diagnostics ?? []],
                 emittedFiles,
                 sourceMaps: [],
             };
@@ -8698,7 +8720,7 @@ export function createTsgoProgram(
             const res = liveProject().program?.emitBuildInfo?.({ build: !!(options as any).tscBuild });
             const outputs = res?.outputFiles ?? [];
             for (const o of outputs) {
-                const outFileName = wireFileNameToHost(o.fileName);
+                const outFileName = hostEmitFileName(wireFileNameToHost(o.fileName));
                 let buildInfo: any;
                 try { buildInfo = JSON.parse(o.text); } catch { /* write text regardless */ }
                 if (write) write(outFileName, o.text, !!o.writeByteOrderMark, undefined, undefined, buildInfo !== undefined ? { buildInfo } : undefined);
