@@ -79,6 +79,10 @@ interface TnbProgramContext {
      * the overlay collect — forwarded as updateSnapshot fileChanges.changed so
      * Go drops its frozen first-read disk view and re-reads (issue #49). */
     pendingExternalChanged?: string[];
+    /** A fresh unversioned CompilerHost has no event stream to invalidate Go's disk snapshot. */
+    pendingInvalidateDisk?: boolean;
+    /** Host overlays that disappeared must also release their native open-file entries. */
+    pendingClosedFiles?: string[];
     pendingReferencedProjects?: string[];
     /** This project's thin program — checker-side host-SF lookups must use it
      * (not the global _hostProgramRef, which tracks the LAST created project). */
@@ -679,7 +683,7 @@ function scheduleScanSfEviction(evict: () => void): void {
  * every span to line 1. Only files surfaced in answers pay the read; the memo
  * is the text itself, so an answer-surfaced file pins its text, not its AST.
  */
-function createSharedLightStub(hostFileName: string, configFilePath: string, metaEnabled: boolean, languageVersion: number, delegatesToLive: boolean): any {
+function createSharedLightStub(hostFileName: string, configFilePath: string, metaEnabled: boolean, languageVersion: number, delegatesToLive: boolean, local?: { materialize: (fileName: string) => any; text?: string; scriptKind?: number }): any {
     const tsgoPath = canonicalSourceFilePath(hostFileName);
     let lazyText: string | undefined;
     let lazyLineStarts: readonly number[] | undefined;
@@ -689,9 +693,13 @@ function createSharedLightStub(hostFileName: string, configFilePath: string, met
     // read would serve the raw SFC as if it were the file's TS content. The
     // mirror also covers the zero-statements edge (empty virtual TS parses to
     // nothing; "" is a real value here, not a miss).
-    const textOf = (): string => lazyText ??= _syncedOverlayContentByFile.get(hostFileName) ?? hostForOverlaySync()?.readFile?.(hostFileName) ?? readDiskText(hostFileName) ?? "";
+    const textOf = (): string => lazyText ??= local?.text ?? _syncedOverlayContentByFile.get(hostFileName) ?? hostForOverlaySync()?.readFile?.(hostFileName) ?? readDiskText(hostFileName) ?? "";
     const lineStartsOf = (): readonly number[] => lazyLineStarts ??= ts.computeLineStarts(textOf());
     const full = (): any => {
+        // CompilerHost overlay walks use a program-local delegate: metadata
+        // enumeration must not parse every virtual file, while an AST access
+        // still resolves through the program that handed out this stub.
+        if (local) return local.materialize(hostFileName);
         if (!delegatesToLive) return undefined;
         // A stale-generation read can race project replacement ("snapshot N
         // not found") — degrade to inert (next read sees the new project).
@@ -739,7 +747,7 @@ function createSharedLightStub(hostFileName: string, configFilePath: string, met
         },
         languageVersion,
         languageVariant: 0,
-        scriptKind: inferScriptKind(hostFileName),
+        scriptKind: local?.scriptKind ?? inferScriptKind(hostFileName),
         isDeclarationFile: hostFileName.endsWith(".d.ts"),
         hasNoDefaultLib: false,
         get referencedFiles() { return delegateOr("referencedFiles", []); },
@@ -2321,6 +2329,7 @@ const _lastAdditionalFilesByConfig = new Map<string, string[]>();
 /** Host context for incremental overlay sync (Volar virtual TS after createProgram). */
 let _overlayHostCtx: { host: any; options: any; configFilePath: string } | undefined;
 let _languageServiceHost: any | undefined;
+const _languageServiceHostByCompilerHost = new WeakMap<object, any>();
 /**
  * True once any host-bound SourceFile has been bound via ensureHostSourceFileBound.
  * Host-bound navigation refinement (resolveHostExportDefaultSymbol /
@@ -2332,8 +2341,9 @@ let _languageServiceHost: any | undefined;
 let _hasHostBoundFiles = false;
 
 /** @internal */
-export function tnbSetLanguageServiceHost(host: any): void {
+export function tnbSetLanguageServiceHost(host: any, compilerHost: object): void {
     _languageServiceHost = host;
+    _languageServiceHostByCompilerHost.set(compilerHost, host);
 }
 
 /** Host script content for tsgo overlay — LS host SSOT, compilerHost fallback at createProgram. */
@@ -2821,6 +2831,15 @@ function resolveTsconfigPath(configFilePath: string, host?: { getCurrentDirector
 }
 /** Host script text — prefers getScriptSnapshot (host SSOT) over readFile. */
 function getHostScriptContent(host: any, fileName: string, options: any): { text: string; scriptKind: number; fromHost: boolean } | undefined {
+    // CompilerHost adapters can expose transformed text without constructing
+    // and retaining an otherwise unused JavaScript SourceFile. This is a
+    // text-only CompilerHost capability, not an LS snapshot/version contract:
+    // fresh plain Programs must still invalidate the native disk snapshot.
+    // When provided, undefined is authoritative (the host has no such file).
+    if (typeof host?.tnbGetSourceText === "function") {
+        const content = host.tnbGetSourceText(fileName);
+        return content === undefined ? undefined : { ...content, fromHost: true };
+    }
     let scriptKind = inferScriptKind(fileName);
     const snap = host?.getScriptSnapshot?.(fileName);
     if (snap) {
@@ -7013,10 +7032,17 @@ export function createTsgoProgram(
     // read by tsgo itself.
     const overlays: any[] = [];
     const names = new Set<string>();
-    const lsHost = _languageServiceHost ?? host;
+    const lsHost = _languageServiceHostByCompilerHost.get(host) ?? host;
+    _languageServiceHost = lsHost;
+    // Unlike LS snapshots and watch events, a plain CompilerHost provides no
+    // change notifications. Each new Program must see current disk contents,
+    // including imports and declarations that are absent from rootNames.
+    const invalidateDisk = !lsHost?.getScriptSnapshot && !host?.tnbWatchSourceFile;
+    if (invalidateDisk) _hostSfStableGlobal.clear();
     const programCtx: TnbProgramContext = {
         lsHost,
         overlayHostCtx: { host: lsHost, options, configFilePath },
+        pendingInvalidateDisk: invalidateDisk,
     };
     // Drained external-change signals (issue #49) — declared outside the
     // collect block: the walk bypasses contentCanDiverge on these paths and
@@ -7116,7 +7142,13 @@ export function createTsgoProgram(
             // eslint repro rewrites a .md-adjacent .ts through the plain-disk path).
             if (!pendingExternalSet?.has(resolvedFn) && !contentCanDiverge(fn, resolvedFn)) continue;
             const content = getHostScriptContentForOverlay(resolvedFn, options, host);
-            if (!content) continue;
+            if (!content) {
+                if (_syncedOverlayContentByFile.has(resolvedFn)) {
+                    (programCtx.pendingClosedFiles ??= []).push(resolvedFn);
+                    forgetSyncedOverlay(resolvedFn);
+                }
+                continue;
+            }
             // Only true overlays (content differs from disk — Volar virtual
             // .vue TS, unsaved edits) are retained and pushed. No AST parse
             // here: the parse is lazy (getLanguageServiceSourceFile re-parses
@@ -7136,14 +7168,16 @@ export function createTsgoProgram(
                 }
                 continue;
             }
+            // Retain this Program's host view even when the native overlay
+            // already contains identical text and needs no transport update.
+            hostContentByFile.set(canonicalSourceFilePath(resolvedFn), content);
             const entry = decideOverlayPush(resolvedFn, content.text, content.scriptKind);
             if (!entry) continue;
-            hostContentByFile.set(resolvedFn, content);
             overlays.push(entry);
             }
         }
     }
-    const preferHostSourceFiles = overlays.length > 0
+    const preferHostSourceFiles = hostContentByFile.size > 0
         || !!(lsHost as any)?.projectService;
     programCtx.pendingOverlays = overlays.length > 0 ? overlays : undefined;
     // #49: host==disk external rewrites ride the next updateSnapshot as
@@ -7478,14 +7512,6 @@ export function createTsgoProgram(
 
     const hostForLs = () => programCtx.lsHost;
 
-    // Presence form (vue-tsc / non-tsserver modes): any host-servable content
-    // keeps the full-SF path those modes were tuned for.
-    const fileHasHostSourceContent = (name: string, hostFileName: string): boolean => {
-        const ls = hostForLs();
-        return hostHasScriptSnapshot(ls, name, hostFileName)
-            || hostContentByFile.has(hostFileName);
-    };
-
     /** Host-parsed AST for Language Service — never tsgo RemoteSourceFile. */
     const getLanguageServiceSourceFile = (hostFileName: string, requestFileName: string): any | undefined => {
         const ls = hostForLs();
@@ -7493,7 +7519,7 @@ export function createTsgoProgram(
         if (fromSnap) return fromSnap;
 
         const hasSnapshot = hostHasScriptSnapshot(ls, requestFileName, hostFileName);
-        const content = hostContentByFile.get(hostFileName);
+        const content = hostContentByFile.get(canonicalSourceFilePath(hostFileName));
         if (content?.text && (!hasSnapshot || content.fromHost)) {
             const scriptKind = resolveLanguageServiceScriptKind(ls, requestFileName, hostFileName, hasSnapshot);
             const sf = createSourceFile(hostFileName, content.text, hostSourceFileOptions(options.target ?? 99), /*setParentNodes*/ true, scriptKind);
@@ -7575,7 +7601,7 @@ export function createTsgoProgram(
                 const snap = ls?.getScriptSnapshot?.(fileName) ?? ls?.getScriptSnapshot?.(hostFileName);
                 const text = snap
                     ? snap.getText(0, snap.getLength())
-                    : (hostContentByFile.get(hostFileName)?.text ?? "");
+                    : (hostContentByFile.get(canonicalSourceFilePath(hostFileName))?.text ?? "");
                 const hostSf = createBoundHostSourceFile(hostFileName, fileName, text);
                 if (hostSf) {
                     ensureTnbVersion(hostSf, hostFileName);
@@ -7620,7 +7646,7 @@ export function createTsgoProgram(
                 hostText = snap.getText(0, snap.getLength());
             }
             else {
-                const cachedText = hostContentByFile.get(hostFileName)?.text;
+                const cachedText = hostContentByFile.get(canonicalSourceFilePath(hostFileName))?.text;
                 if (cachedText !== undefined) {
                     hostText = cachedText;
                 }
@@ -7665,7 +7691,7 @@ export function createTsgoProgram(
         // of the host-AST memory, with getNamedDeclarations / getStart /
         // operator-keyword / jsDoc children patched to stock shape in
         // installRemoteNodeTraversalHooks.
-        const hostContent = hostContentByFile.get(hostFileName);
+        const hostContent = hostContentByFile.get(canonicalSourceFilePath(hostFileName));
         const text = hostContent?.text ?? host?.readFile?.(hostFileName) ?? "";
         const scriptKind = hostContent?.scriptKind ?? inferScriptKind(hostFileName);
         const sf = createSkeletonSourceFile(hostFileName, text, options.target ?? 99, scriptKind);
@@ -7732,7 +7758,7 @@ export function createTsgoProgram(
         // stays on the raw fileName to preserve existing host-content hits.
         const hostFileName = resolveHostFileName(fileName, host);
         if (diagnosticSfCache.has(hostFileName)) return diagnosticSfCache.get(hostFileName);
-        const hostContent = hostContentByFile.get(fileName) ?? hostContentByFile.get(hostFileName);
+        const hostContent = hostContentByFile.get(canonicalSourceFilePath(hostFileName));
         const text = hostContent?.text ?? host?.readFile?.(fileName) ?? "";
         const scriptKind = hostContent?.scriptKind ?? inferScriptKind(hostFileName);
         const sf = createSkeletonSourceFile(hostFileName, text, options.target ?? 99, scriptKind);
@@ -7766,6 +7792,10 @@ export function createTsgoProgram(
     // history), and multi-project builders hold stale generations a live
     // materializer must never be consulted for.
     const tsserverWalk = !!(lsHost as any)?.projectService;
+    // Volar CLI overlays need real ASTs only for AST consumers, not for
+    // --listFiles, statistics or builder metadata walks. Keep these stubs
+    // local so a later Program cannot replace their AST materializer.
+    const hostWalkStubs = preferHostSourceFiles && !tsserverWalk ? new Map<string, any>() : undefined;
     // Mirror of the getBuilderMetaState fetch gate, for shared-stub version getters.
     const builderMetaEnabled = !((options as any).tscBuild && !options.incremental && !options.composite);
     // Per-program host-version snapshot for the createLanguageService path: a
@@ -7793,16 +7823,24 @@ export function createTsgoProgram(
         // Cross-config sharing is first-creator-fixed: the Map is keyed by file
         // name alone, so a stub's metaEnabled/configFilePath were captured from
         // whichever config created it, not the one asking now.
-        let sf = _lightSfSharedByFile.get(hostFileName);
+        const content = hostContentByFile.get(canonicalSourceFilePath(hostFileName));
+        // Preserve inert disk metadata stubs in CLI projects: only host
+        // virtual content (or an LS snapshot contract) needs an AST delegate.
+        // Upgrading plain dependency declarations during builder property
+        // probes would otherwise parse the complete dependency graph in JS.
+        const local = hostWalkStubs && (content || typeof lsHost?.getScriptSnapshot === "function");
+        const cache = local ? hostWalkStubs! : _lightSfSharedByFile;
+        let sf = cache.get(hostFileName);
         if (!sf) {
             // Metadata-only SourceFile stub: no host.readFile, no computeLineStarts,
             // no AST. BuilderProgram state creation only needs these fields to key
             // fileInfos and to ask for referenced/imported files (empty here).
             // tsserver getScriptInfos() requires ScriptInfo for every returned file;
             // default libs are not opened as ScriptInfo — exclude them here.
-            sf = createSharedLightStub(hostFileName, configFilePath, builderMetaEnabled, options.target ?? 99, tsserverWalk);
+            sf = createSharedLightStub(hostFileName, configFilePath, builderMetaEnabled, options.target ?? 99, tsserverWalk,
+                local ? { materialize: getOrCreateSourceFile, text: content?.text, scriptKind: content?.scriptKind } : undefined);
             ensureFileModuleMeta(sf);
-            _lightSfSharedByFile.set(hostFileName, sf);
+            cache.set(hostFileName, sf);
         }
         return sf;
     };
@@ -8257,9 +8295,6 @@ export function createTsgoProgram(
             if (incHostName !== undefined) {
                 return getOrCreateSourceFile(incHostName);
             }
-            if (!tsserverWalk && fileHasHostSourceContent(pathStr, pathStr)) {
-                return getOrCreateSourceFile(pathStr);
-            }
             // Identity before stub (see fullSfByName above).
             return fullSfByName.get(hostNameForQuery(pathStr)) ?? getOrCreateLightSourceFile(pathStr);
         },
@@ -8274,8 +8309,9 @@ export function createTsgoProgram(
             // cold-open enumerator (auto-import scan, telemetry, resolution-
             // cache finish) reads only path metadata, and FAR/import-tracker
             // upgrades files on demand through the stub's delegating getters.
-            // vue-tsc (preferHost via overlays, no projectService) keeps
-            // content-gated materialization to avoid --build OOM.
+            // CompilerHost overlay walks use program-local delegating stubs;
+            // merely listing virtual files must not create a second full AST
+            // beside the host's own cached SourceFiles and the native checker.
             for (const name of names) {
                 // Default libs join the LS walk view only under tsserver
                 // (projectService), where FAR/highlights/rename need their
@@ -8286,12 +8322,6 @@ export function createTsgoProgram(
                 if (preferLightProgramFiles) {
                     // Identity before stub (see fullSfByName).
                     sf = fullSfByName.get(name) ?? getOrCreateLightSourceFile(name);
-                }
-                // name is host-form already (getSourceFileNames decode boundary).
-                // tsserverWalk: every file is a delegating light stub (B-1);
-                // other modes keep content-gated materialization.
-                else if (!tsserverWalk && fileHasHostSourceContent(name, name)) {
-                    sf = getOrCreateSourceFile(name);
                 }
                 else {
                     // Identity before stub (see fullSfByName).
@@ -9678,6 +9708,8 @@ export function createTsgoChecker(program: any): any {
         // needsReload). One-shot per collect; not persisted per config.
         const externalChanged = programCtx?.pendingExternalChanged;
         if (programCtx) programCtx.pendingExternalChanged = undefined;
+        const invalidateDisk = programCtx?.pendingInvalidateDisk;
+        if (programCtx) programCtx.pendingInvalidateDisk = undefined;
 
         const syncHost = hostForOverlaySyncLocal();
         const openFiles = syncHost ? collectTsgoOpenFileNames(syncHost) : [];
@@ -9687,7 +9719,8 @@ export function createTsgoChecker(program: any): any {
         // (updateAPIRootFiles) indefinitely. The tracker is session-wide (the
         // bridge session is per process), so any project's refresh releases
         // the close for every project in one snapshot.
-        let closedTabs: string[] | undefined;
+        let closedTabs = programCtx?.pendingClosedFiles;
+        if (programCtx) programCtx.pendingClosedFiles = undefined;
         const tabRegistry = (syncHost as any)?.projectService;
         if (tabRegistry?.openFiles?.forEach) {
             const openTabs = new Set<string>();
@@ -9696,7 +9729,7 @@ export function createTsgoChecker(program: any): any {
                 if (info?.isScriptOpen?.() && info.fileName) openTabs.add(resolveHostFileName(info.fileName, syncHost));
             });
             const closed = [..._sessionSentOpenTabs].filter(f => !openTabs.has(f));
-            if (closed.length) closedTabs = closed;
+            if (closed.length) closedTabs = [...new Set([...(closedTabs ?? []), ...closed])];
             _sessionSentOpenTabs.clear();
             for (const f of openTabs) _sessionSentOpenTabs.add(f);
             // Go drops these overlays with the close — the synced-content memo
@@ -9729,7 +9762,8 @@ export function createTsgoChecker(program: any): any {
             ...(openFilesWithContent.length > 0 ? { openFilesWithContent } : {}),
             ...(extraFileExtensions ? { extraFileExtensions } : {}),
             ...(additionalFiles?.length ? { additionalFiles } : {}),
-            ...(externalChanged?.length ? { fileChanges: { changed: externalChanged } } : {}),
+            ...(invalidateDisk ? { fileChanges: { invalidateAll: true } }
+                : externalChanged?.length ? { fileChanges: { changed: externalChanged } } : {}),
             ...(buildClose.closeParams ?? {}),
             ...(prefetchDiagnostics ? { prefetchDiagnostics: true } : {}),
         };

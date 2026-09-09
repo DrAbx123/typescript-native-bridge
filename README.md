@@ -148,6 +148,13 @@ Compiler API.
   `extraFileExtensions` contract — no hard-coded per-framework special case.
 - Host-injected **virtual content** (Volar virtual TS, glint's transformed modules,
   svelte's ambient shims) reaches the Go checker.
+- A CompilerHost adapter may expose `tnbGetSourceText(fileName)` returning
+  `{ text, scriptKind }` or `undefined` for a missing file. This avoids constructing
+  a JavaScript AST solely to send transformed text to the native checker. It must
+  return the same text and script kind as `getSourceFile`; a missing result is
+  authoritative. Fresh Programs still observe disk changes, and deleted virtual
+  content releases its native overlay. File enumeration parses virtual ASTs only
+  when a consumer reads AST fields.
 - `allowArbitraryExtensions` is inferred `true` when host extra extensions are present
   and tsconfig leaves it unset; explicit `false` opts out.
 - **Not supported:** custom `resolveModuleNames` / `resolveModuleNameLiterals` that

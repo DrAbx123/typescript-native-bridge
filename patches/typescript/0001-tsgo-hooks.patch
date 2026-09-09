@@ -239,7 +239,7 @@ index 68133ac5f1..3effa07d2c 100644
      return fn === undefined ? undefined : fn(node, cbNode, cbNodes);
  }
 diff --git a/src/compiler/program.ts b/src/compiler/program.ts
-index b44a155f01..b494fec36a 100644
+index b44a155f01..d6716efd54 100644
 --- a/src/compiler/program.ts
 +++ b/src/compiler/program.ts
 @@ -48,6 +48,7 @@ import {
@@ -260,7 +260,7 @@ index b44a155f01..b494fec36a 100644
 +    // createProgram overhead on self-lint. The tsgo backend is the fork's whole
 +    // purpose, so it is always taken when a tsconfig is available.
 +    if (options.configFilePath) {
-+        return createTsgoProgram(rootNames, options, createProgramOptionsHost, projectReferences, configFileParsingDiagnostics) as Program;
++        return createTsgoProgram(rootNames, options, createProgramOptionsHost ?? createCompilerHost(options), projectReferences, configFileParsingDiagnostics) as Program;
 +    }
 +
      const reportInvalidIgnoreDeprecations = memoize(() => createOptionValueDiagnostic("ignoreDeprecations", Diagnostics.Invalid_value_for_ignoreDeprecations));
@@ -2356,7 +2356,7 @@ index 0a45cc3e3e..a25ff3b71e 100644
  export function getDefinitionAndBoundSpan(program: Program, sourceFile: SourceFile, position: number): DefinitionInfoAndBoundSpan | undefined {
      const definitions = getDefinitionAtPosition(program, sourceFile, position);
 diff --git a/src/services/services.ts b/src/services/services.ts
-index 9885093ed6..043f2a36f2 100644
+index 9885093ed6..060cbb77b7 100644
 --- a/src/services/services.ts
 +++ b/src/services/services.ts
 @@ -330,6 +330,9 @@ import {
@@ -2390,7 +2390,7 @@ index 9885093ed6..043f2a36f2 100644
  
          // Get a fresh cache of the host information
          const newSettings = host.getCompilationSettings() || getDefaultCompilerOptions();
-@@ -1733,6 +1743,17 @@ export function createLanguageService(
+@@ -1733,6 +1743,16 @@ export function createLanguageService(
          let parsedCommandLines: Map<Path, ParsedCommandLine | false> | undefined;
  
          // Now create a new compiler
@@ -2404,10 +2404,17 @@ index 9885093ed6..043f2a36f2 100644
 +            getComments: decls => JsDoc.getJsDocCommentsFromDeclarations(decls),
 +            getTags: decls => JsDoc.getJsDocTagsFromDeclarations(decls as Declaration[] | undefined),
 +        });
-+        tnbSetLanguageServiceHost(host);
          let compilerHost: CompilerHost | undefined = {
              getSourceFile: getOrCreateSourceFile,
              getSourceFileByPath: getOrCreateSourceFileByPath,
+@@ -1776,6 +1796,7 @@ export function createLanguageService(
+             getGlobalTypingsCacheLocation: maybeBind(host, host.getGlobalTypingsCacheLocation),
+         };
+ 
++        tnbSetLanguageServiceHost(host, compilerHost);
+         const originalGetSourceFile = compilerHost.getSourceFile;
+ 
+         const { getSourceFileWithCache } = changeCompilerHostLikeToUseCache(
 @@ -1807,7 +1828,19 @@ export function createLanguageService(
          let releasedScriptKinds: Set<Path> | undefined = new Set();
  
