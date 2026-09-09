@@ -93,7 +93,7 @@ function runScenario(name, padNames) {
 		}
 		// Normalize the machine-local fixture prefix; keep per-line order.
 		const body = (r.stdout + r.stderr)
-			.split('\n')
+			.split(/\r?\n/)
 			.filter(l => l.includes('error TS'))
 			.map(l => l.replace(dir, '<fixture>'))
 			.join('\n');

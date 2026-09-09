@@ -31,6 +31,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createInterface } from 'node:readline';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tnbPath = process.env.TNB_GHOST_TSSERVER ?? path.join(repoRoot, 'lib', 'tsserver.js');
@@ -43,24 +44,6 @@ fs.writeFileSync(path.join(dir, 'other.ts'), '');
 const main = path.join(dir, 'main.ts');
 const ghost = path.join(dir, 'ghost.ts'); // deliberately absent on disk
 const other = path.join(dir, 'other.ts');
-
-/** tsserver answers Content-Length framed; requests go in as ndjson. */
-function parseStdoutFramed(onMsg) {
-	let buf = '';
-	return chunk => {
-		buf += chunk.toString();
-		for (;;) {
-			const m = buf.match(/^Content-Length:\s*(\d+)\r\n\r\n/);
-			if (!m) break;
-			const len = Number(m[1]);
-			const start = m[0].length;
-			if (buf.length < start + len) break;
-			const body = buf.slice(start, start + len);
-			buf = buf.slice(start + len);
-			try { onMsg(JSON.parse(body)); } catch { /* partial/garbage */ }
-		}
-	};
-}
 
 function pidAlive(pid) {
 	try {
@@ -80,9 +63,12 @@ async function withServer(label, tsserverPath, fn) {
 	let stderr = '';
 	child.stderr.on('data', d => { stderr += d; });
 	const responses = new Map();
-	child.stdout.on('data', parseStdoutFramed(msg => {
+	// tsserver emits one JSON payload per line after its Content-Length header.
+	createInterface({ input: child.stdout, crlfDelay: Infinity }).on('line', line => {
+		if (!line || line.startsWith('Content-Length:')) return;
+		const msg = JSON.parse(line);
 		if (msg?.type === 'response') responses.set(msg.request_seq, msg);
-	}));
+	});
 	let seq = 0;
 	const send = async (command, arguments_, ms = 120_000) => {
 		const n = ++seq;

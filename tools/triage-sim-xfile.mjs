@@ -4,11 +4,11 @@
  * Read-only fixtures; all edits via in-memory updateOpen textChanges.
  */
 import * as fs from 'node:fs';
-import * as path from 'node:path';
+import { posix as path } from 'node:path';
 import { resolveVolarRoot } from './volar-root.mjs';
 import { tnbHarnessEnv, withTsserver } from './tsserver-harness.mjs';
 
-const volarRoot = resolveVolarRoot();
+const volarRoot = normFile(resolveVolarRoot());
 const stockPath = process.env.STOCK_TSSERVER_PATH ?? '/tmp/stock-ts-p3/package/lib/tsserver.js';
 const tnbPath = path.join(volarRoot, 'node_modules/typescript/lib/tsserver.js');
 const pluginProbe = path.join(volarRoot, 'packages/language-server');
@@ -35,7 +35,7 @@ unknown var void while with yield satisfies overrides bigint
 function existsFile(p) {
 	try { return fs.existsSync(p) && fs.statSync(p).isFile(); } catch { return false; }
 }
-function normFile(f) { return f == null ? '' : String(f); }
+function normFile(f) { return f == null ? '' : String(f).replaceAll('\\', '/'); }
 function badTnbPath(f) {
 	const s = normFile(f);
 	if (!s) return false;
@@ -176,7 +176,7 @@ function createEventSink() {
 	function notify() { for (const w of [...waiters]) w(); }
 	function onEvent(ev) {
 		const e = ev?.event;
-		const file = ev?.body?.file;
+		const file = normFile(ev?.body?.file);
 		if (file && (e === 'syntaxDiag' || e === 'semanticDiag' || e === 'suggestionDiag')) {
 			if (!byFile.has(file)) byFile.set(file, {});
 			const slot = byFile.get(file);
@@ -204,7 +204,8 @@ function createEventSink() {
 			const iv = setInterval(tick, 25);
 		});
 		const sendP = send('geterr', { delay: 0, files }, timeoutMs).catch(() => null);
-		await Promise.race([waitDone, sendP.then(async () => waitDone)]);
+		const outcome = await Promise.race([waitDone, sendP.then(async () => waitDone)]);
+		if (outcome !== 'ready') throw new Error(`geterr diagnostics timed out for ${files.join(', ')}`);
 		await new Promise(r => setTimeout(r, 50));
 		const out = {};
 		for (const f of files) out[f] = byFile.get(f) ?? {};

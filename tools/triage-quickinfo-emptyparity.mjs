@@ -12,9 +12,10 @@
 // stock parity.
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { tnbHarnessEnv, withTsserver } from './tsserver-harness.mjs';
 
-const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const tnbPath = path.join(repoRoot, 'lib', 'tsserver.js');
 const stockPath = process.env.STOCK_TSSERVER_PATH ?? '/tmp/stock-ts-p3/package/lib/tsserver.js';
 

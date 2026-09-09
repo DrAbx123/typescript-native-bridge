@@ -464,7 +464,7 @@ function makeEventRouter(eventState) {
 		if (eventName !== 'syntaxDiag' && eventName !== 'semanticDiag' && eventName !== 'suggestionDiag') {
 			return;
 		}
-		if (ev?.body?.file !== w.file) return;
+		if (ev?.body?.file?.replaceAll('\\', '/') !== w.file.replaceAll('\\', '/')) return;
 		const diags = ev?.body?.diagnostics ?? [];
 		if (eventName === 'syntaxDiag') w.bucket.syntax = diags;
 		if (eventName === 'semanticDiag') w.bucket.semantic = diags;

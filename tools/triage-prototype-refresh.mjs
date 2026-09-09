@@ -155,7 +155,7 @@ try {
 	assertParity('before refresh', before);
 
 	const externalDefinition = navigate(languageService, externalPosition);
-	if (!externalDefinition?.definitions?.some(definition => definition.fileName === externalFile)) {
+	if (!externalDefinition?.definitions?.some(definition => path.resolve(definition.fileName) === path.resolve(externalFile))) {
 		throw new Error(`definition target missing: ${JSON.stringify(externalDefinition?.definitions ?? [])}`);
 	}
 	service.openClientFile(externalFile, externalText, ts.ScriptKind.TS);

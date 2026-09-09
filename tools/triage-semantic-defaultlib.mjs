@@ -12,7 +12,7 @@ const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(import.meta.dirname, '..');
 const ts = require(path.join(repoRoot, 'lib', 'typescript.js'));
 
-const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tnb-semantic-defaultlib-')));
+const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'tnb-semantic-defaultlib-')));
 const appFile = path.join(dir, 'app.ts');
 const depDir = path.join(dir, 'node_modules', 'dependency');
 const depFile = path.join(depDir, 'index.d.ts');

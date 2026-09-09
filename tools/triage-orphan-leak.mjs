@@ -15,11 +15,12 @@
  *   STOCK_TSSERVER_PATH  override stock tsserver.js path (default /tmp/stock-ts-p3/...)
  *   TNB_ORPHAN_ONLY=tnb|stock  run one side only
  */
-import { spawn, fork, execSync } from 'node:child_process';
+import { spawn, fork, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createInterface } from 'node:readline';
 import { resolveVolarRoot } from './volar-root.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -41,43 +42,22 @@ function pidAlive(pid) {
 	}
 }
 
-function countPs(pattern) {
-	try {
-		const out = execSync(`ps ax -o pid=,ppid=,command=`, { encoding: 'utf8' });
-		return out.split('\n').filter(line => new RegExp(pattern).test(line)).length;
-	} catch {
-		return 0;
+function processRows() {
+	if (process.platform === 'win32') {
+		const output = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+			'[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress'],
+		{ encoding: 'utf8', windowsHide: true });
+		return JSON.parse(output).map(p => `${p.ProcessId} ${p.ParentProcessId} ${p.CommandLine ?? ''}`);
 	}
+	return execFileSync('ps', ['ax', '-o', 'pid=,ppid=,command='], { encoding: 'utf8' }).split('\n');
+}
+
+function countPs(pattern) {
+	return processRows().filter(line => new RegExp(pattern).test(line)).length;
 }
 
 function countGoChildren() {
-	try {
-		const out = execSync(`ps ax -o pid=,command=`, { encoding: 'utf8' });
-		return out.split('\n').filter(line => /tsgo|native-preview/.test(line) && !/rg |triage-orphan/.test(line)).length;
-	} catch {
-		return 0;
-	}
-}
-
-function parseStdoutFramed(onMsg) {
-	let buf = '';
-	return chunk => {
-		buf += chunk.toString();
-		for (;;) {
-			const m = buf.match(/^Content-Length:\s*(\d+)\r\n\r\n/);
-			if (!m) break;
-			const len = Number(m[1]);
-			const start = m[0].length;
-			if (buf.length < start + len) break;
-			const body = buf.slice(start, start + len);
-			buf = buf.slice(start + len);
-			try {
-				onMsg(JSON.parse(body));
-			} catch {
-				// ignore partial/garbage
-			}
-		}
-	};
+	return processRows().filter(line => /tsgo|native-preview/.test(line) && !/rg |triage-orphan/.test(line)).length;
 }
 
 /**
@@ -116,9 +96,12 @@ async function withServer({ label, tsserverPath, mode }, fn) {
 			if (msg?.type === 'response') responses.set(msg.request_seq, msg);
 		});
 	} else {
-		child.stdout.on('data', parseStdoutFramed(msg => {
+		// tsserver emits one JSON payload per line after its Content-Length header.
+		createInterface({ input: child.stdout, crlfDelay: Infinity }).on('line', line => {
+			if (!line || line.startsWith('Content-Length:')) return;
+			const msg = JSON.parse(line);
 			if (msg?.type === 'response') responses.set(msg.request_seq, msg);
-		}));
+		});
 	}
 
 	let seq = 0;
@@ -219,7 +202,7 @@ async function assertExitWithin({ child, label, how, ms = EXIT_MS }) {
 	);
 	if (alive) {
 		try {
-			console.log(execSync(`ps -p ${child.pid} -o pid=,ppid=,pcpu=,etime=,command=`, { encoding: 'utf8' }).trim());
+			console.log(processRows().filter(line => line.trimStart().startsWith(`${child.pid} `)).join('\n'));
 		} catch {
 			// ignore
 		}

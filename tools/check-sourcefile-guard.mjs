@@ -60,8 +60,8 @@ const env = {
 };
 
 const vitest = spawnSync(
-	"npx",
-	["vitest", "run", "packages/tsc", "--maxWorkers=1", "--pool=threads"],
+	process.execPath,
+	[path.join(volarVue, "node_modules", "vitest", "vitest.mjs"), "run", "packages/tsc", "--maxWorkers=1", "--pool=threads"],
 	{ cwd: volarVue, env, encoding: "utf8", maxBuffer: 1 << 28 },
 );
 
@@ -75,9 +75,13 @@ const vitest = spawnSync(
 const vitestOut = `${vitest.stdout ?? ""}\n${vitest.stderr ?? ""}`.replace(/\[[0-9;]*m/g, "");
 const vitestFinished = /Test Files\s+\d+\s+(failed|passed)/.test(vitestOut)
 	|| /Tests\s+\d+\s+(failed|passed)/.test(vitestOut);
+if (!vitestFinished || vitest.error || vitest.status !== 0) {
+	console.error(vitestOut);
+}
+if (vitest.error || vitest.status !== 0) {
+	fail(`vue-tsc tests failed: ${vitest.error?.message ?? vitest.signal ?? `exit ${vitest.status}`}`);
+}
 if (!vitestFinished) {
-	console.error(vitest.stdout);
-	console.error(vitest.stderr);
 	fail(`vue-tsc did not finish (no vitest run summary; likely native crash, exit ${vitest.status ?? "signal"})`);
 }
 
