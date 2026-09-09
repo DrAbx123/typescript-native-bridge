@@ -155,6 +155,12 @@ Compiler API.
   authoritative. Fresh Programs still observe disk changes, and deleted virtual
   content releases its native overlay. File enumeration parses virtual ASTs only
   when a consumer reads AST fields.
+- `afterDeclarations` supports syntax transforms on native-emitted declarations
+  when `declarationMap` is disabled and `outFile` is unset. These transformers
+  receive a parsed `.d.ts` tree, without links to original source nodes. Native
+  code performs type checking and declaration generation. JavaScript `before` /
+  `after` transforms, declaration maps and bundles with custom transforms fail
+  explicitly rather than dropping the requested transform.
 - `allowArbitraryExtensions` is inferred `true` when host extra extensions are present
   and tsconfig leaves it unset; explicit `false` opts out.
 - **Not supported:** custom `resolveModuleNames` / `resolveModuleNameLiterals` that

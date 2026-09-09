@@ -8570,16 +8570,16 @@ export function createTsgoProgram(
         // through the caller's writeFile (or the host's) so --noEmit, Volar output
         // redirection, and build-mode writeFile wrapping stay in the host's control.
         emit: (targetSourceFile?: any, writeFile?: any, _ct?: any, emitOnlyDtsFiles?: boolean, customTransformers?: any, forceDtsEmit?: boolean) => {
-            // Issue #40: tsgo can't execute JS transformer functions, so a
-            // custom transformer would be silently dropped and the emit would
-            // diverge from stock (nest-cli's metadata plugin path) — fail
-            // loudly. Empty shells ({ before: [] } — no transformation either
-            // way) pass through.
-            const hasTransformers = customTransformers
-                && [customTransformers.before, customTransformers.after, customTransformers.afterDeclarations]
-                    .some((a: any) => a?.length);
-            if (hasTransformers) {
-                throw new Error("tsgoChecker: Program.emit does not support customTransformers — tsgo cannot execute JS transformer functions");
+            // The native checker/emitter cannot run JS/semantic transforms.
+            // Declaration syntax transforms can run on its emitted .d.ts
+            // without repeating type checking in JavaScript. Original-source
+            // node links are unavailable on that parsed declaration tree.
+            const afterDeclarations = customTransformers?.afterDeclarations;
+            if (customTransformers?.before?.length || customTransformers?.after?.length) {
+                throw new Error("tsgoChecker: Program.emit does not support before/after customTransformers — tsgo cannot execute JS transformer functions");
+            }
+            if (afterDeclarations?.length && (options.declarationMap || options.outFile)) {
+                throw new Error("tsgoChecker: afterDeclarations customTransformers require declarationMap=false and no outFile — transformed declaration maps and bundles are not supported");
             }
             // Stock handleNoEmitOptions (emitWorker runs it before any real
             // emit): under --noEmit a whole-program emit degenerates to
@@ -8606,6 +8606,7 @@ export function createTsgoProgram(
             const emitOnly = forceDtsEmit ? 3 : (emitOnlyDtsFiles ? 2 : undefined);
             const res = liveProject().program?.emit?.({ file, emitOnly, forceDtsEmit: !!forceDtsEmit });
             const outputs = res?.outputFiles ?? [];
+            const transformerDiagnostics: any[] = [];
             const write = typeof writeFile === "function" ? writeFile : host?.writeFile?.bind(host);
             // Match stock emitter.ts — see emitBuildInfo comment above.
             const emittedFiles: string[] | undefined = options.listEmittedFiles ? [] : undefined;
@@ -8614,15 +8615,31 @@ export function createTsgoProgram(
                 // Go-computed output path — crosses the wire boundary before
                 // reaching writeFile/emittedFiles consumers.
                 const outFileName = wireFileNameToHost(o.fileName);
+                let text = o.text;
+                if (afterDeclarations?.length && /\.d\.(?:ts|mts|cts)$/.test(outFileName)) {
+                    const declaration = createSourceFile(outFileName, text, options.target ?? 99, /*setParentNodes*/ true, ts.ScriptKind.TS);
+                    const transformed = ts.transformNodes(undefined, undefined, ts.factory, options, [declaration], afterDeclarations, /*allowDtsFiles*/ true);
+                    try {
+                        text = ts.createPrinter({ removeComments: options.removeComments, newLine: options.newLine }, {
+                            substituteNode: transformed.substituteNode,
+                            onEmitNode: transformed.emitNodeWithNotification,
+                        })
+                            .printFile(transformed.transformed[0]);
+                        transformerDiagnostics.push(...transformed.diagnostics ?? []);
+                    }
+                    finally {
+                        transformed.dispose();
+                    }
+                }
                 // Builder wrappers mutate data (data.skippedDtsWrite on the
                 // dts-unchanged skip path in builder.ts), so a data object
                 // must always ride along — stock emitter threads one too.
-                if (write) write(outFileName, o.text, !!o.writeByteOrderMark, undefined, sourceFiles, {});
+                if (write) write(outFileName, text, !!o.writeByteOrderMark, undefined, sourceFiles, {});
                 emittedFiles?.push(outFileName);
             }
             return {
                 emitSkipped: res?.emitSkipped ?? false,
-                diagnostics: mapTsgoDiagnostics(res?.diagnostics, getDiagnosticSourceFile),
+                diagnostics: [...mapTsgoDiagnostics(res?.diagnostics, getDiagnosticSourceFile), ...transformerDiagnostics],
                 emittedFiles,
                 sourceMaps: [],
             };
