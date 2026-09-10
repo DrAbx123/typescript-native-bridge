@@ -36,7 +36,7 @@ const positions = [
 	{ file: bPath, line: 45, offset: 85 },
 ];
 
-async function run(label, tsserverPath, env) {
+async function run(tsserverPath, env) {
 	return withTsserver({ tsserverPath, args: ['--disableAutomaticTypingAcquisition', '--suppressDiagnosticEvents'], env }, async ({ send }) => {
 		await send('updateOpen', {
 			changedFiles: [], closedFiles: [],
@@ -55,8 +55,8 @@ async function run(label, tsserverPath, env) {
 	});
 }
 
-const tnb = await run('TNB', tnbPath, tnbHarnessEnv());
-const stock = await run('STOCK', stockPath, process.env);
+const tnb = await run(tnbPath, tnbHarnessEnv());
+const stock = await run(stockPath, process.env);
 let diff = 0;
 for (let i = 0; i < positions.length; i++) {
 	const p = positions[i];

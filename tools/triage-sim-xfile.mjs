@@ -311,7 +311,7 @@ async function discoverSymbols(send, candidates) {
 async function runSide(label, tsserverPath, env, fixedSymbols = null) {
 	const sink = createEventSink();
 	const captured = {};
-	const meta = { label, symbols: [], churnOpenAfter: [], scene5QuickinfoTargets: [] };
+	const meta = { label, symbols: [], churnOpenAfter: [] };
 
 	await withTsserver({
 		tsserverPath, args: harnessArgs, env, deadlineMs: 600_000, onEvent: sink.onEvent,
@@ -348,9 +348,7 @@ async function runSide(label, tsserverPath, env, fixedSymbols = null) {
 		const discovered = await discoverSymbols(send, candidates);
 		const symbols = (fixedSymbols && fixedSymbols.length) ? fixedSymbols : discovered;
 		meta.symbols = symbols;
-		meta.discovered = discovered;
 		captured.__symbols = symbols;
-		captured.__discovered = discovered;
 
 		for (const sym of symbols) {
 			const idBase = `${sym.name}@${path.basename(sym.file)}:${sym.line}:${sym.offset}`;
@@ -437,7 +435,6 @@ async function runSide(label, tsserverPath, env, fixedSymbols = null) {
 		// SCENE 5
 		const s5Files = meta.churnOpenAfter.length ? meta.churnOpenAfter : churnFiles.slice(4);
 		await send('updateOpen', { changedFiles: [], closedFiles: [], openFiles: openFilesArgs(s5Files, diskContent, cm) });
-		meta.scene5QuickinfoTargets = s5Files;
 		const needFile = s5Files[0];
 		let pinfo;
 		try { pinfo = await send('projectInfo', { file: needFile, needFileNameList: false }, 20_000); }

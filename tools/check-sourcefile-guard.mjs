@@ -72,7 +72,7 @@ const vitest = spawnSync(
 // absence means the process died mid-run. Strip ANSI colors first: vitest
 // colorizes its summary in CI (FORCE_COLOR-style environments), which would
 // otherwise break the plain-text match.
-const vitestOut = `${vitest.stdout ?? ""}\n${vitest.stderr ?? ""}`.replace(/\[[0-9;]*m/g, "");
+const vitestOut = `${vitest.stdout ?? ""}\n${vitest.stderr ?? ""}`.replace(/\u001b\[[0-9;]*m/g, "");
 const vitestFinished = /Test Files\s+\d+\s+(failed|passed)/.test(vitestOut)
 	|| /Tests\s+\d+\s+(failed|passed)/.test(vitestOut);
 if (!vitestFinished || vitest.error || vitest.status !== 0) {
