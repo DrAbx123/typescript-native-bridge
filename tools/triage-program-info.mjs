@@ -150,7 +150,8 @@ function childMain() {
 	out.fileIncludeReasons = reasons;
 	// Module-specifier lookup must preserve the cached resolution (including
 	// unresolved entries and package metadata), without asking the checker to
-	// load the imported declarations. Verbose tsserver logging uses this API.
+	// load the imported declarations. explainFiles' include-reason pass and the
+	// go-to-definition / import-fix services read it.
 	const modeFile = program.getSourceFile(path.join(dir, 'src/路径 Mixed.mts'));
 	const specifiers = [...modeFile.imports];
 	assert.equal(specifiers.length, 6);

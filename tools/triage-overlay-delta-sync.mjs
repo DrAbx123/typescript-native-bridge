@@ -112,8 +112,8 @@ await withTsserver(
 		// editor as an incremental change with the new disk text already live.
 		fs.writeFileSync(mainTs, hostText.get(mainTs));
 		await qiAt(mainTs, 'before', 'saved');
-		// The second file has never had an overlay, so it also checks native
-		// disk-cache invalidation independently of saved-overlay bookkeeping.
+		// fresh.ts carries host content but no edit history, so it also
+		// checks disk-cache invalidation independently of save bookkeeping.
 		for (const file of [mainTs, freshTs]) {
 			const saved = hostText.get(file);
 			const externalError = '\nexport const externalValue: string = 1;\n';
