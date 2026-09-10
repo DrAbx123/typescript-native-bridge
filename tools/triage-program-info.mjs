@@ -31,6 +31,7 @@
  * Exit 0: every compared surface matches stock. Exit 1: divergence.
  */
 import { spawnSync } from 'node:child_process';
+import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -77,6 +78,21 @@ const FIXTURE = {
 	].join('\n'),
 	'src/shared.ts': 'export const sharedValue: string = "s";\n',
 	'src/broken.ts': '/// <reference path="./does-not-exist.ts" />\nexport const z: number = 1;\n',
+	'src/路径 Mixed.mts': [
+		'import type { Tag as Imported } from "dual";',
+		'import type { Tag as Required } from "dual" with { "resolution-mode": "require" };',
+		'import Common = require("dual");',
+		'export type Dynamic = import("dual", { with: { "resolution-mode": "require" } }).Tag;',
+		'export { sharedValue } from "./shared.ts";',
+		'import "./missing.js";',
+		'',
+	].join('\r\n'),
+	'node_modules/dual/package.json': JSON.stringify({
+		name: 'dual', version: '1.2.3',
+		exports: { import: './import.d.mts', require: './require.d.cts' },
+	}),
+	'node_modules/dual/import.d.mts': 'export type Tag = "import";\n',
+	'node_modules/dual/require.d.cts': 'export type Tag = "require";\n',
 	'node_modules/@types/fake-types/package.json': JSON.stringify({
 		name: '@types/fake-types',
 		version: '1.0.0',
@@ -132,6 +148,58 @@ function childMain() {
 		}));
 	}
 	out.fileIncludeReasons = reasons;
+	// Module-specifier lookup must preserve the cached resolution (including
+	// unresolved entries and package metadata), without asking the checker to
+	// load the imported declarations. Verbose tsserver logging uses this API.
+	const modeFile = program.getSourceFile(path.join(dir, 'src/路径 Mixed.mts'));
+	const specifiers = [...modeFile.imports];
+	assert.equal(specifiers.length, 6);
+	assert.equal(program.getSourceFileByPath(modeFile.path), modeFile);
+	const resolveSymbol = checker.resolveExternalModuleName;
+	let symbolLookups = 0;
+	checker.resolveExternalModuleName = (...args) => {
+		symbolLookups++;
+		return resolveSymbol.apply(checker, args);
+	};
+	try {
+		out.moduleSpecifierResolutions = specifiers.map(specifier => {
+			const mode = program.getModeForUsageLocation(modeFile, specifier);
+			const cached = program.getResolvedModule(modeFile, specifier.text, mode);
+			assert.ok(cached, `resolution entry missing: ${specifier.text}`);
+			for (let repeat = 0; repeat < 3; repeat++) {
+				assert.equal(program.getResolvedModuleFromModuleSpecifier(specifier, modeFile), cached);
+				assert.equal(program.getResolvedModuleFromModuleSpecifier(specifier), cached);
+			}
+			const resolved = cached.resolvedModule;
+			return {
+				name: specifier.text, mode,
+				resolved: resolved ? {
+					file: rel(resolved.resolvedFileName),
+					extension: resolved.extension,
+					external: resolved.isExternalLibraryImport,
+					packageId: resolved.packageId,
+					originalPath: resolved.originalPath && rel(resolved.originalPath),
+					resolvedUsingTsExtension: !!resolved.resolvedUsingTsExtension,
+				} : null,
+			};
+		});
+		assert.equal(symbolLookups, 0, 'cached resolution must not resolve module symbols');
+		assert.deepEqual(out.moduleSpecifierResolutions.map(r => [r.name, r.mode, r.resolved?.file ?? null]), [
+			['dual', ts.ModuleKind.ESNext, 'node_modules/dual/import.d.mts'],
+			['dual', ts.ModuleKind.CommonJS, 'node_modules/dual/require.d.cts'],
+			['dual', ts.ModuleKind.CommonJS, 'node_modules/dual/require.d.cts'],
+			['./shared.ts', ts.ModuleKind.ESNext, 'src/shared.ts'],
+			['./missing.js', ts.ModuleKind.ESNext, null],
+			['dual', ts.ModuleKind.CommonJS, 'node_modules/dual/require.d.cts'],
+		]);
+		assert.equal(out.moduleSpecifierResolutions[0].resolved.packageId.version, '1.2.3');
+		assert.equal(out.moduleSpecifierResolutions[3].resolved.resolvedUsingTsExtension, true);
+		assert.throws(() => program.getResolvedModuleFromModuleSpecifier(ts.factory.createStringLiteral('dual')),
+			/must have a `SourceFile` ancestor/);
+	}
+	finally {
+		checker.resolveExternalModuleName = resolveSymbol;
+	}
 
 	// ── explainFiles end-to-end (reason lines only; implied-format lines read
 	// light-stub module state on TNB — out of scope for this witness) ──
@@ -230,7 +298,7 @@ function runChild(side, dir) {
 }
 
 function parentMain() {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tnb-program-info-'));
+	const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'tnb-program-info-')));
 	writeFixture(dir);
 	const stock = runChild('stock', dir);
 	const tnb = runChild('tnb', dir);

@@ -25,7 +25,7 @@ import { usingSingleLineStringWriter, canHaveJSDoc, isAnyImportOrReExport, getEx
 import { getParseTreeNode, isFunctionLike, isExternalModuleNameRelative } from "./utilitiesPublic.js";
 import { isStringLiteral, isModuleDeclaration } from "./factory/nodeTests.js";
 import { setEmitFlags, addEmitFlags } from "./factory/emitNode.js";
-import { getModeForResolutionAtIndex } from "./program.js";
+import { getModeForResolutionAtIndex, getModeForUsageLocation } from "./program.js";
 import { installTsgoBackedSourceFileLoader, inferScriptKind, createSkeletonSourceFile, getTsgoBackedSourceFile } from "./tsgoBackedSourceFile.js";
 import { getTnbPackageRoot, bundledLibPathToHostPath, isBundledLibPath, isHostLibFile, resolveHostFileName, toHostFileName, toTsgoFileName, wireFileNameToHost } from "./tsgoLibPaths.js";
 
@@ -8782,10 +8782,8 @@ export function createTsgoProgram(
             try { return goProgram()?.getDefaultResolutionModeForFile?.(id); } catch { return undefined; }
         },
         getModeForUsageLocation: (file: any, usage: any) => {
-            const id = programFileId(file);
-            const pos = usagePosition(usage);
-            if (!id || typeof pos !== "number") return undefined;
-            try { return goProgram()?.getModeForUsageLocation?.(id, pos); } catch { return undefined; }
+            ensureFileModuleMeta(file);
+            return getModeForUsageLocation(file, usage, optionsForFile(file));
         },
         getModeForResolutionAtIndex: (file: any, index: number) => {
             if (!file) return undefined;
@@ -8915,25 +8913,14 @@ export function createTsgoProgram(
         // the same data stock's resolvedModules cache answers.
         getResolvedModule: (file: any, moduleName: string, mode: any) =>
             getProgramResolutions().modules.get(file?.path)?.get(moduleName, mode),
-        // No resolution cache on the thin program; resolve through the checker
-        // (tsgo RPC) so services' getReferenceAtPosition can produce stock's
-        // file-start definition for module specifiers.
-        getResolvedModuleFromModuleSpecifier: (moduleSpecifier: any, _sourceFile?: any) => {
-            try {
-                const sym = checker.resolveExternalModuleName?.(moduleSpecifier);
-                const decl = sym?.declarations?.[0];
-                const sf = decl && (decl.kind === ts.SyntaxKind.SourceFile ? decl : decl.getSourceFile?.());
-                const fileName = sf?.fileName;
-                if (typeof fileName !== "string" || !fileName) return undefined;
-                return {
-                    resolvedModule: {
-                        resolvedFileName: fileName,
-                        extension: extensionFromPathOrTs(fileName),
-                        isExternalLibraryImport: fileName.includes("/node_modules/"),
-                    },
-                    failedLookupLocations: [],
-                };
-            } catch { return undefined; }
+        // Stock reads the same mode-aware cache as getResolvedModule. Resolving
+        // symbols here loses package metadata and makes explainFiles bind and
+        // materialize every imported declaration during project loading.
+        getResolvedModuleFromModuleSpecifier: (moduleSpecifier: any, sourceFile?: any) => {
+            sourceFile ??= ts.getSourceFileOfNode(moduleSpecifier);
+            ts.Debug.assertIsDefined(sourceFile,
+                "`moduleSpecifier` must have a `SourceFile` ancestor. Use `program.getResolvedModule` instead to provide the containing file and resolution mode.");
+            return thinProgram.getResolvedModule(sourceFile, moduleSpecifier.text, thinProgram.getModeForUsageLocation(sourceFile, moduleSpecifier));
         },
         // Reads the lazily materialized type-reference resolution map.
         getResolvedTypeReferenceDirective: (file: any, typeDirectiveName: string, mode: any) =>

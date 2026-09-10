@@ -129,6 +129,18 @@ function checkTextCompilerHost(native) {
     assert.equal(entry.statements.length, 2);
     assert.equal(entry.statements[1].declarationList.declarations[0].name.getText(), 'firstVirtual');
     assert.equal(first.getSourceFile(virtual), first.getSourceFileByPath(entry.path));
+    const checkResolution = (program, expectedFile) => {
+        const source = program.getSourceFile(virtual);
+        const specifier = source.statements[0].moduleSpecifier;
+        const mode = program.getModeForUsageLocation(source, specifier);
+        const cached = program.getResolvedModule(source, specifier.text, mode);
+        assert.ok(cached?.resolvedModule, 'text-only host import must have a program resolution');
+        assert.equal(canonical(cached.resolvedModule.resolvedFileName), canonical(expectedFile));
+        assert.equal(program.getResolvedModuleFromModuleSpecifier(specifier, source), cached);
+        assert.equal(program.getResolvedModuleFromModuleSpecifier(specifier), cached);
+        assert.equal(program.getResolvedModuleFromModuleSpecifier(specifier, program.getSourceFileByPath(source.path)), cached);
+    };
+    checkResolution(first, dependency);
     ts.performance.disable();
 
     // A text hook does not promise LS versioning: imported disk edits must
@@ -149,6 +161,12 @@ function checkTextCompilerHost(native) {
     assert.equal(makeProgram().getSourceFile(virtual), undefined, 'deleted host content must release its native overlay');
     virtualText = restoredText;
     assert.deepEqual(makeProgram().getSemanticDiagnostics(), [], 'a recreated overlay must be checked again');
+    const replacement = `${textDir}/replacement.ts`;
+    fs.writeFileSync(replacement, 'export const value = 2;\n');
+    virtualText = virtualText.replace('./dependency', './replacement');
+    const redirected = makeProgram();
+    assert.deepEqual(redirected.getSemanticDiagnostics(), []);
+    checkResolution(redirected, replacement);
     console.log('check:text-host ok (no duplicate parse; real AST walks; fresh disk imports and virtual text)');
 }
 function checkDiskPrograms(name) {
