@@ -150,17 +150,19 @@ Compiler API.
   svelte's ambient shims) reaches the Go checker.
 - A CompilerHost adapter may expose `tnbGetSourceText(fileName)` returning
   `{ text, scriptKind }` or `undefined` for a missing file. This avoids constructing
-  a JavaScript AST solely to send transformed text to the native checker. It must
-  return the same text and script kind as `getSourceFile`; a missing result is
-  authoritative. Fresh Programs still observe disk changes, and deleted virtual
+  a JavaScript AST solely to send transformed text to the native checker. The
+  bridge consults it before `getScriptSnapshot` / `getSourceFile` / `readFile` and
+  uses the returned fields verbatim; `undefined` is authoritative (the host has no
+  such file). Fresh Programs still observe disk changes, and deleted virtual
   content releases its native overlay. File enumeration parses virtual ASTs only
   when a consumer reads AST fields.
 - `afterDeclarations` supports syntax transforms on native-emitted declarations
   when `declarationMap` is disabled and `outFile` is unset. These transformers
   receive a parsed `.d.ts` tree, without links to original source nodes. Native
   code performs type checking and declaration generation. JavaScript `before` /
-  `after` transforms, declaration maps and bundles with custom transforms fail
-  explicitly rather than dropping the requested transform.
+  `after` transforms fail explicitly, and `afterDeclarations` combined with
+  declaration maps or `outFile` bundles is rejected rather than dropping the
+  requested transform.
 - `Program.emit` rejects `outFile` bundles explicitly: the native emitter produces
   individual files and cannot satisfy a bundled-output request.
 - `allowArbitraryExtensions` is inferred `true` when host extra extensions are present
