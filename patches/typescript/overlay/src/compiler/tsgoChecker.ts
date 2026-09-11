@@ -683,7 +683,7 @@ function scheduleScanSfEviction(evict: () => void): void {
  * every span to line 1. Only files surfaced in answers pay the read; the memo
  * is the text itself, so an answer-surfaced file pins its text, not its AST.
  */
-function createSharedLightStub(hostFileName: string, configFilePath: string, metaEnabled: boolean, languageVersion: number, delegatesToLive: boolean, local?: { materialize: (fileName: string) => any; text?: string; scriptKind?: number }): any {
+function createSharedLightStub(hostFileName: string, configFilePath: string, metaEnabled: boolean, languageVersion: number, delegatesToLive: boolean, localDelegate?: { materialize: (fileName: string) => any; text?: string; scriptKind?: number }): any {
     const tsgoPath = canonicalSourceFilePath(hostFileName);
     let lazyText: string | undefined;
     let lazyLineStarts: readonly number[] | undefined;
@@ -693,13 +693,13 @@ function createSharedLightStub(hostFileName: string, configFilePath: string, met
     // read would serve the raw SFC as if it were the file's TS content. The
     // mirror also covers the zero-statements edge (empty virtual TS parses to
     // nothing; "" is a real value here, not a miss).
-    const textOf = (): string => lazyText ??= local?.text ?? _syncedOverlayContentByFile.get(hostFileName) ?? hostForOverlaySync()?.readFile?.(hostFileName) ?? readDiskText(hostFileName) ?? "";
+    const textOf = (): string => lazyText ??= localDelegate?.text ?? _syncedOverlayContentByFile.get(hostFileName) ?? hostForOverlaySync()?.readFile?.(hostFileName) ?? readDiskText(hostFileName) ?? "";
     const lineStartsOf = (): readonly number[] => lazyLineStarts ??= ts.computeLineStarts(textOf());
     const full = (): any => {
         // CompilerHost overlay walks use a program-local delegate: metadata
         // enumeration must not parse every virtual file, while an AST access
         // still resolves through the program that handed out this stub.
-        if (local) return local.materialize(hostFileName);
+        if (localDelegate) return localDelegate.materialize(hostFileName);
         if (!delegatesToLive) return undefined;
         // A stale-generation read can race project replacement ("snapshot N
         // not found") — degrade to inert (next read sees the new project).
@@ -747,7 +747,7 @@ function createSharedLightStub(hostFileName: string, configFilePath: string, met
         },
         languageVersion,
         languageVariant: 0,
-        scriptKind: local?.scriptKind ?? inferScriptKind(hostFileName),
+        scriptKind: localDelegate?.scriptKind ?? inferScriptKind(hostFileName),
         isDeclarationFile: hostFileName.endsWith(".d.ts"),
         hasNoDefaultLib: false,
         get referencedFiles() { return delegateOr("referencedFiles", []); },
@@ -7030,10 +7030,9 @@ export function createTsgoProgram(
     // virtual TS for .vue via getSourceFile). Reused by getOrCreateSourceFile
     // for skeleton text / diagnostic line maps without re-entering getSourceFile.
     // Only true overlays (content differing from disk) are retained: keeping
-    // disk-identical reads here made fileHasHostSourceContent true for the
-    // whole corpus, so builder getSourceFiles walks full-materialized every
-    // file on every watch generation instead of serving light stubs
-    // (issue #11).
+    // disk-identical reads here made every file look like host content, so
+    // builder getSourceFiles walks full-materialized every file on every
+    // watch generation instead of serving light stubs (issue #11).
     const hostContentByFile = new Map<string, { text: string; scriptKind: number; fromHost?: boolean }>();
 
     // Collect host file content for tsgo overlays — makes the fork host the
@@ -7686,11 +7685,11 @@ export function createTsgoProgram(
         // of the host-AST memory, with getNamedDeclarations / getStart /
         // operator-keyword / jsDoc children patched to stock shape in
         // installRemoteNodeTraversalHooks.
-        const hostContent = hostContentByFile.get(canonicalSourceFilePath(hostFileName));
+        const canon = canonicalSourceFilePath(hostFileName);
+        const hostContent = hostContentByFile.get(canon);
         const text = hostContent?.text ?? host?.readFile?.(hostFileName) ?? "";
         const scriptKind = hostContent?.scriptKind ?? inferScriptKind(hostFileName);
         const sf = createSkeletonSourceFile(hostFileName, text, options.target ?? 99, scriptKind);
-        const canon = canonicalSourceFilePath(hostFileName);
         const anySf = sf as any;
         anySf.path = canon;
         anySf.resolvedPath = canon;
@@ -7749,15 +7748,15 @@ export function createTsgoProgram(
     const getDiagnosticSourceFile = (fileName: string): any => {
         // Normalize identity to the same key as host/full/light so a diagnostic
         // file matches the program SourceFile Volar remaps against, and so the
-        // canonical path lines up across materializations (Axis C). Text lookup
-        // stays on the raw fileName to preserve existing host-content hits.
+        // canonical path lines up across materializations (Axis C). Host content
+        // is keyed canonically too; the disk fallback keeps the raw fileName.
         const hostFileName = resolveHostFileName(fileName, host);
         if (diagnosticSfCache.has(hostFileName)) return diagnosticSfCache.get(hostFileName);
-        const hostContent = hostContentByFile.get(canonicalSourceFilePath(hostFileName));
+        const canon = canonicalSourceFilePath(hostFileName);
+        const hostContent = hostContentByFile.get(canon);
         const text = hostContent?.text ?? host?.readFile?.(fileName) ?? "";
         const scriptKind = hostContent?.scriptKind ?? inferScriptKind(hostFileName);
         const sf = createSkeletonSourceFile(hostFileName, text, options.target ?? 99, scriptKind);
-        const canon = canonicalSourceFilePath(hostFileName);
         const anyDiagSf = sf as any;
         anyDiagSf.path = canon;
         anyDiagSf.resolvedPath = canon;
@@ -7823,8 +7822,8 @@ export function createTsgoProgram(
         // virtual content (or an LS snapshot contract) needs an AST delegate.
         // Upgrading plain dependency declarations during builder property
         // probes would otherwise parse the complete dependency graph in JS.
-        const local = hostWalkStubs && (content || typeof lsHost?.getScriptSnapshot === "function");
-        const cache = local ? hostWalkStubs! : _lightSfSharedByFile;
+        const localStubs = hostWalkStubs && (content || typeof lsHost?.getScriptSnapshot === "function") ? hostWalkStubs : undefined;
+        const cache = localStubs ?? _lightSfSharedByFile;
         let sf = cache.get(hostFileName);
         if (!sf) {
             // Metadata-only SourceFile stub: no host.readFile, no computeLineStarts,
@@ -7833,7 +7832,7 @@ export function createTsgoProgram(
             // tsserver getScriptInfos() requires ScriptInfo for every returned file;
             // default libs are not opened as ScriptInfo — exclude them here.
             sf = createSharedLightStub(hostFileName, configFilePath, builderMetaEnabled, options.target ?? 99, tsserverWalk,
-                local ? { materialize: getOrCreateSourceFile, text: content?.text, scriptKind: content?.scriptKind } : undefined);
+                localStubs ? { materialize: getOrCreateSourceFile, text: content?.text, scriptKind: content?.scriptKind } : undefined);
             ensureFileModuleMeta(sf);
             cache.set(hostFileName, sf);
         }
@@ -8637,7 +8636,7 @@ export function createTsgoProgram(
                             onEmitNode: transformed.emitNodeWithNotification,
                         })
                             .printFile(transformed.transformed[0]);
-                        transformerDiagnostics.push(...transformed.diagnostics ?? []);
+                        transformerDiagnostics.push(...(transformed.diagnostics ?? []));
                     }
                     finally {
                         transformed.dispose();
@@ -8653,10 +8652,10 @@ export function createTsgoProgram(
             // whole-program emit includes it in the same callback/result.
             const buildInfo = !targetSourceFile && !res?.emitSkipped && !outputs.some((o: any) => o.fileName.endsWith(".tsbuildinfo"))
                 ? thinProgram.emitBuildInfo(writeFile, _ct) : undefined;
-            emittedFiles?.push(...buildInfo?.emittedFiles ?? []);
+            emittedFiles?.push(...(buildInfo?.emittedFiles ?? []));
             return {
                 emitSkipped: (res?.emitSkipped ?? false) || (buildInfo?.emitSkipped ?? false),
-                diagnostics: [...mapTsgoDiagnostics(res?.diagnostics, getDiagnosticSourceFile), ...transformerDiagnostics, ...buildInfo?.diagnostics ?? []],
+                diagnostics: [...mapTsgoDiagnostics(res?.diagnostics, getDiagnosticSourceFile), ...transformerDiagnostics, ...(buildInfo?.diagnostics ?? [])],
                 emittedFiles,
                 sourceMaps: [],
             };
