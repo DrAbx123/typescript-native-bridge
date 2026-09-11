@@ -71,7 +71,7 @@ try {
 		if (!details.success) throw new Error(details.message || 'completionEntryDetails failed');
 		const changes = details.body?.[0]?.codeActions?.flatMap(action => action.changes ?? []) ?? [];
 		const importEdit = changes
-			.filter(change => path.resolve(change.fileName) === path.resolve(main))
+			.filter(change => path.resolve(change.fileName) === main)
 			.flatMap(change => change.textChanges ?? [])
 			.find(change => change.newText.includes('ReadRecordModel') && change.newText.includes(entry.source));
 		if (!importEdit) throw new Error(`completionEntryDetails returned no ${entry.source} import edit`);
