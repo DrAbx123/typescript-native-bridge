@@ -37,13 +37,14 @@ const before = 1;
 `;
 const otherV0 = `export const other = "v1";
 `;
+const freshV0 = 'export const fresh = 1;\n';
 fs.writeFileSync(mainTs, mainV0);
 fs.writeFileSync(otherTs, otherV0);
-fs.writeFileSync(freshTs, 'export const fresh = 1;\n');
+fs.writeFileSync(freshTs, freshV0);
 
 // Host-text mirror: the witness composes every edit locally so query
 // positions are computed from the true current text, never hand-counted.
-const hostText = new Map([[mainTs, mainV0], [otherTs, otherV0], [freshTs, 'export const fresh = 1;\n']]);
+const hostText = new Map([[mainTs, mainV0], [otherTs, otherV0], [freshTs, freshV0]]);
 function lineCol(text, index) {
 	const pre = text.slice(0, index).split('\n');
 	return { line: pre.length, offset: pre[pre.length - 1].length + 1 };

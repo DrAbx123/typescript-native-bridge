@@ -52,8 +52,8 @@ function processRows() {
 	return execFileSync('ps', ['ax', '-o', 'pid=,ppid=,command='], { encoding: 'utf8' }).split('\n');
 }
 
-function countPs(pattern) {
-	return processRows().filter(line => new RegExp(pattern).test(line)).length;
+function countProcesses(re) {
+	return processRows().filter(line => re.test(line)).length;
 }
 
 function countGoChildren() {
@@ -222,7 +222,7 @@ console.log(`triage-orphan-leak: repo=${repoRoot}`);
 console.log(`  TNB=${tnbPath}`);
 console.log(`  STOCK=${stockPath}`);
 
-const beforeHelper = countPs('Code Helper|tsserver');
+const beforeHelper = countProcesses(/Code Helper|tsserver/);
 const beforeGo = countGoChildren();
 console.log(`  pre counts: CodeHelper|tsserver=${beforeHelper} tsgo|native-preview=${beforeGo}`);
 
@@ -272,7 +272,7 @@ if (only !== 'tnb') {
 }
 
 await sleep(500);
-const afterHelper = countPs('Code Helper|tsserver');
+const afterHelper = countProcesses(/Code Helper|tsserver/);
 const afterGo = countGoChildren();
 const orphanOk = afterHelper <= beforeHelper;
 const goOk = afterGo <= beforeGo;

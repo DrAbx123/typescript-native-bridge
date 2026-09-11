@@ -87,7 +87,10 @@ function checkTextCompilerHost(native) {
     const textDir = path.join(dir, 'text-host').replaceAll('\\', '/');
     fs.mkdirSync(textDir);
     const virtual = `${textDir}/virtual.ts`;
-    const canonical = file => ts.sys.useCaseSensitiveFileNames ? file.replaceAll('\\', '/') : file.replaceAll('\\', '/').toLowerCase();
+    const canonical = file => {
+        const slashed = file.replaceAll('\\', '/');
+        return ts.sys.useCaseSensitiveFileNames ? slashed : slashed.toLowerCase();
+    };
     const dependency = `${textDir}/dependency.ts`;
     const options = {
         strict: true, noEmit: true, types: [], target: ts.ScriptTarget.ESNext,

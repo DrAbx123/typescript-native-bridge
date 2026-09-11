@@ -75,10 +75,11 @@ const vitest = spawnSync(
 const vitestOut = `${vitest.stdout ?? ""}\n${vitest.stderr ?? ""}`.replace(/\u001b\[[0-9;]*m/g, "");
 const vitestFinished = /Test Files\s+\d+\s+(failed|passed)/.test(vitestOut)
 	|| /Tests\s+\d+\s+(failed|passed)/.test(vitestOut);
-if (!vitestFinished || vitest.error || vitest.status !== 0) {
+const vitestFailed = !!vitest.error || vitest.status !== 0;
+if (vitestFailed || !vitestFinished) {
 	console.error(vitestOut);
 }
-if (vitest.error || vitest.status !== 0) {
+if (vitestFailed) {
 	fail(`vue-tsc tests failed: ${vitest.error?.message ?? vitest.signal ?? `exit ${vitest.status}`}`);
 }
 if (!vitestFinished) {

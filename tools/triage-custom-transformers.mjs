@@ -57,23 +57,23 @@ check('empty shells: emit proceeds', !res.emitSkipped && written.some(f => f.end
 
 fs.writeFileSync(mainFile, 'export const surface = { internal: 1, public: "x" };\n');
 const declarationOptions = { ...parsed.options, declaration: true, emitDeclarationOnly: true };
-function declarationOutput(sdk) {
+function declarationOutput(tsModule) {
 	const output = [];
-	const declarationProgram = sdk.createProgram(parsed.fileNames, declarationOptions);
+	const declarationProgram = tsModule.createProgram(parsed.fileNames, declarationOptions);
 	const transform = context => sourceFile => {
 		const visit = node => {
-			if (sdk.isPropertySignature(node) && sdk.isIdentifier(node.name) && node.name.text === 'internal') {
+			if (tsModule.isPropertySignature(node) && tsModule.isIdentifier(node.name) && node.name.text === 'internal') {
 				return context.factory.updatePropertySignature(node, node.modifiers,
 					context.factory.createStringLiteral('#internal'), node.questionToken, node.type);
 			}
-			return sdk.visitEachChild(node, visit, context);
+			return tsModule.visitEachChild(node, visit, context);
 		};
-		return sdk.visitEachChild(sourceFile, visit, context);
+		return tsModule.visitEachChild(sourceFile, visit, context);
 	};
 	const result = declarationProgram.emit(undefined, (file, text) => {
 		if (file.endsWith('.d.ts')) output.push(text.replaceAll('\r\n', '\n'));
 	}, undefined, true, { afterDeclarations: [transform] });
-	check(`${sdk === ts ? 'native' : 'stock'}: declaration syntax transform emitted`, !result.emitSkipped && result.diagnostics.length === 0 && output.length === 1);
+	check(`${tsModule === ts ? 'native' : 'stock'}: declaration syntax transform emitted`, !result.emitSkipped && result.diagnostics.length === 0 && output.length === 1);
 	return output;
 }
 const stockPath = process.env.STOCK_TYPESCRIPT_PATH

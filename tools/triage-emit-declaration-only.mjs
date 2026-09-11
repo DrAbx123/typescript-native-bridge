@@ -59,17 +59,17 @@ const variants = [
 	{ declarationDir: '.' },
 	{ outDir: '.', incremental: true, tsBuildInfoFile: './cache/build.tsbuildinfo' },
 ];
-function paths(sdk, extra, single, differentCwd = false) {
+function collectEmitPaths(tsModule, extra, single, differentCwd = false) {
 	const options = {
 		strict: true, declaration: true, declarationMap: true, sourceMap: true,
-		listEmittedFiles: true, types: [], target: sdk.ScriptTarget.ES2022,
-		module: sdk.ModuleKind.Preserve, moduleResolution: sdk.ModuleResolutionKind.Bundler,
-		jsx: sdk.JsxEmit.Preserve, rootDir: path.join(dir, 'src'),
+		listEmittedFiles: true, types: [], target: tsModule.ScriptTarget.ES2022,
+		module: tsModule.ModuleKind.Preserve, moduleResolution: tsModule.ModuleResolutionKind.Bundler,
+		jsx: tsModule.JsxEmit.Preserve, rootDir: path.join(dir, 'src'),
 		configFilePath: path.join(dir, 'tsconfig.json'), ...extra,
 	};
-	const host = sdk.createCompilerHost(options);
+	const host = tsModule.createCompilerHost(options);
 	if (differentCwd) host.getCurrentDirectory = () => path.dirname(dir);
-	const program = sdk.createProgram({ rootNames: roots, options, host });
+	const program = tsModule.createProgram({ rootNames: roots, options, host });
 	const written = [];
 	const result = program.emit(single ? program.getSourceFile(roots[0]) : undefined,
 		fileName => written.push(fileName), undefined, single);
@@ -79,7 +79,7 @@ function paths(sdk, extra, single, differentCwd = false) {
 for (const extra of variants) {
 	for (const single of [false, true]) {
 		for (const differentCwd of [false, true]) {
-			assert.deepEqual(paths(ts, extra, single, differentCwd), paths(stock, extra, single, differentCwd),
+			assert.deepEqual(collectEmitPaths(ts, extra, single, differentCwd), collectEmitPaths(stock, extra, single, differentCwd),
 				`writeFile/emittedFiles paths must match stock for ${JSON.stringify(extra)} single=${single} differentCwd=${differentCwd}`);
 		}
 	}
@@ -88,6 +88,6 @@ console.log('ok relative output callback paths match stock');
 // Native emits individual files for outFile, so pretending to support this
 // request would silently replace a bundle with unrelated per-file outputs.
 for (const single of [false, true]) {
-	assert.throws(() => paths(ts, { outFile: './bundle.js', module: ts.ModuleKind.AMD }, single), /does not support outFile bundles/);
+	assert.throws(() => collectEmitPaths(ts, { outFile: './bundle.js', module: ts.ModuleKind.AMD }, single), /does not support outFile bundles/);
 }
 console.log('ok unsupported native outFile bundles reject explicitly');

@@ -40,8 +40,5 @@ run();
 assert.match(fs.readFileSync(path.join(dir, 'dist', 'src', 'index.js'), 'utf8'), /\/\/ touch/);
 run(); // steady state
 
-if (!fs.existsSync(path.join(dir, 'dist', 'src', 'index.d.ts'))) {
-	console.error('FAIL: no d.ts emitted');
-	process.exit(1);
-}
+assert.ok(fs.existsSync(path.join(dir, 'dist', 'src', 'index.d.ts')), 'no d.ts emitted');
 console.log('ok incremental composite rebuild (edit + dts-skip path)');

@@ -154,7 +154,7 @@ function childMain() {
 	// go-to-definition / import-fix services read it.
 	const modeFile = program.getSourceFile(path.join(dir, 'src/路径 Mixed.mts'));
 	const specifiers = [...modeFile.imports];
-	assert.equal(specifiers.length, 6);
+	assert.equal(specifiers.length, 6, 'fixture must exercise 6 module specifiers');
 	assert.equal(program.getSourceFileByPath(modeFile.path), modeFile);
 	const resolveSymbol = checker.resolveExternalModuleName;
 	let symbolLookups = 0;

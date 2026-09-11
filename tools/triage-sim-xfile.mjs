@@ -204,7 +204,7 @@ function createEventSink() {
 			const iv = setInterval(tick, 25);
 		});
 		const sendP = send('geterr', { delay: 0, files }, timeoutMs).catch(() => null);
-		const outcome = await Promise.race([waitDone, sendP.then(async () => waitDone)]);
+		const outcome = await Promise.race([waitDone, sendP.then(() => waitDone)]);
 		if (outcome !== 'ready') throw new Error(`geterr diagnostics timed out for ${files.join(', ')}`);
 		await new Promise(r => setTimeout(r, 50));
 		const out = {};
