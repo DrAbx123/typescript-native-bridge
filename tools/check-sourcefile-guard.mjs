@@ -103,16 +103,15 @@ if (statFiles.length) {
 		}
 		catch { /* partial write — ignore */ }
 	}
-}
-else {
+} else {
 	console.error(vitest.stdout);
 	console.error(vitest.stderr);
 	fail(`guard stats files missing at ${statsPath}.* — overlay did not write TNB_GUARD_STATS_FILE`);
 }
 
 if (stats) {
-	const total = stats.totalRpcCount ?? 0;
-	const rpc = stats.getSourceFileRpcCount ?? 0;
+	const total = stats.totalRpcCount;
+	const rpc = stats.getSourceFileRpcCount;
 
 	// total === 0 means no tsgo RPC ran at all — the workload never reached the
 	// bridge (wrong workload, or the overlay failed to load), so a "low"
