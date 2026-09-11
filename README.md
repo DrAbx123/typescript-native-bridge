@@ -149,20 +149,18 @@ Compiler API.
 - Host-injected **virtual content** (Volar virtual TS, glint's transformed modules,
   svelte's ambient shims) reaches the Go checker.
 - A CompilerHost adapter may expose `tnbGetSourceText(fileName)` returning
-  `{ text, scriptKind }` or `undefined` for a missing file. This avoids constructing
-  a JavaScript AST solely to send transformed text to the native checker. The
-  bridge consults it before `getScriptSnapshot` / `getSourceFile` / `readFile` and
-  uses the returned fields verbatim; `undefined` is authoritative (the host has no
-  such file). Fresh Programs still observe disk changes, and deleted virtual
-  content releases its native overlay. File enumeration parses virtual ASTs only
-  when a consumer reads AST fields.
-- `afterDeclarations` supports syntax transforms on native-emitted declarations
-  when `declarationMap` is disabled and `outFile` is unset. These transformers
-  receive a parsed `.d.ts` tree, without links to original source nodes. Native
-  code performs type checking and declaration generation. JavaScript `before` /
-  `after` transforms fail explicitly, and `afterDeclarations` combined with
-  declaration maps or `outFile` bundles is rejected rather than dropping the
-  requested transform.
+  `{ text, scriptKind }`, or `undefined` when it has no such file. The bridge consults
+  it before `getScriptSnapshot` / `getSourceFile` / `readFile` and uses the fields
+  verbatim, so transformed text reaches the native checker without building a
+  JavaScript AST just to read it. `undefined` is authoritative; fresh Programs still
+  observe disk changes, deleted virtual content releases its native overlay, and
+  enumeration walks read AST fields only when a consumer asks for them.
+- `afterDeclarations` can run syntax transforms on native-emitted declarations when
+  `declarationMap` is off and `outFile` is unset: the transformer sees a parsed
+  `.d.ts` tree with no links back to original source nodes, while type checking and
+  declaration generation stay native. `before` / `after` JavaScript transforms fail
+  explicitly, and `afterDeclarations` with declaration maps or `outFile` is rejected
+  rather than silently dropping the requested transform.
 - `Program.emit` rejects `outFile` bundles explicitly: the native emitter produces
   individual files and cannot satisfy a bundled-output request.
 - `allowArbitraryExtensions` is inferred `true` when host extra extensions are present
